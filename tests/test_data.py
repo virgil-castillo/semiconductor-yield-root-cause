@@ -4,10 +4,12 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from yield_risk.data import load_secom
+from yield_risk.validation import validate_secom
 
 
 @pytest.fixture()
@@ -69,3 +71,58 @@ class TestLoadSecom:
 
     def test_row_index_unique(self, raw_dir: Path) -> None:
         assert load_secom(raw_dir).index.is_unique
+
+
+class TestValidateSecom:
+    """Tests for validate_secom."""
+
+    @pytest.fixture()
+    def valid_df(self) -> pd.DataFrame:
+        """Minimal valid DataFrame matching the full SECOM schema (1567 x 592)."""
+        sensor_cols = [f"sensor_{i:03d}" for i in range(590)]
+        df = pd.DataFrame(
+            np.zeros((1567, 590), dtype=float),
+            columns=pd.Index(sensor_cols),
+        )
+        df["label"] = 0
+        df["timestamp"] = "2008-01-01 00:00:00"
+        return df
+
+    def test_valid_df_passes(self, valid_df: pd.DataFrame) -> None:
+        validate_secom(valid_df)  # must not raise
+
+    def test_wrong_row_count_raises(self, valid_df: pd.DataFrame) -> None:
+        with pytest.raises(ValueError, match="shape"):
+            validate_secom(valid_df.iloc[:100])
+
+    def test_wrong_column_count_raises(self, valid_df: pd.DataFrame) -> None:
+        with pytest.raises(ValueError, match="shape"):
+            validate_secom(valid_df.drop(columns=["sensor_000"]))
+
+    def test_missing_sensor_column_raises(self, valid_df: pd.DataFrame) -> None:
+        bad = valid_df.rename(columns={"sensor_000": "bad_col"})
+        with pytest.raises(ValueError, match="sensor_000"):
+            validate_secom(bad)
+
+    def test_missing_label_column_raises(self, valid_df: pd.DataFrame) -> None:
+        # Keep shape intact by swapping label for a dummy column.
+        bad = valid_df.drop(columns=["label"]).assign(extra=0)
+        with pytest.raises(ValueError, match="label"):
+            validate_secom(bad)
+
+    def test_missing_timestamp_column_raises(self, valid_df: pd.DataFrame) -> None:
+        bad = valid_df.drop(columns=["timestamp"]).assign(extra=0)
+        with pytest.raises(ValueError, match="timestamp"):
+            validate_secom(bad)
+
+    def test_invalid_label_value_raises(self, valid_df: pd.DataFrame) -> None:
+        bad = valid_df.copy()
+        bad["label"] = 2
+        with pytest.raises(ValueError, match="label"):
+            validate_secom(bad)
+
+    def test_duplicate_index_raises(self, valid_df: pd.DataFrame) -> None:
+        bad = valid_df.copy()
+        bad.index = pd.RangeIndex(len(bad)) * 0  # all zeros
+        with pytest.raises(ValueError, match="duplicate"):
+            validate_secom(bad)
