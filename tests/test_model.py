@@ -1,0 +1,92 @@
+"""Tests for baseline model construction, training, and cross-validation."""
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+
+from yield_risk.model import (
+    build_baseline_pipeline,
+    cross_validate_model,
+    train_model,
+)
+
+
+@pytest.fixture()
+def synthetic_data() -> tuple[pd.DataFrame, pd.Series]:
+    """100-row binary dataset: 85 negatives, 15 positives."""
+    rng = np.random.default_rng(42)
+    X = pd.DataFrame(
+        rng.normal(0, 1, (100, 5)),
+        columns=[f"f{i}" for i in range(5)],
+    )
+    y = pd.Series([0] * 85 + [1] * 15)
+    return X, y
+
+
+class TestBuildBaselinePipeline:
+    def test_has_scaler_step(self) -> None:
+        pipeline = build_baseline_pipeline(random_seed=42)
+        assert isinstance(pipeline.named_steps["scaler"], StandardScaler)
+
+    def test_has_classifier_step(self) -> None:
+        pipeline = build_baseline_pipeline(random_seed=42)
+        assert isinstance(
+            pipeline.named_steps["classifier"], LogisticRegression
+        )
+
+    def test_classifier_uses_balanced_class_weight(self) -> None:
+        pipeline = build_baseline_pipeline(random_seed=42)
+        clf = pipeline.named_steps["classifier"]
+        assert clf.class_weight == "balanced"
+
+    def test_classifier_uses_given_seed(self) -> None:
+        pipeline = build_baseline_pipeline(random_seed=99)
+        clf = pipeline.named_steps["classifier"]
+        assert clf.random_state == 99
+
+
+class TestTrainModel:
+    def test_pipeline_is_fitted_after_training(
+        self,
+        synthetic_data: tuple[pd.DataFrame, pd.Series],
+    ) -> None:
+        X, y = synthetic_data
+        pipeline = build_baseline_pipeline(random_seed=42)
+        train_model(pipeline, X, y)
+        assert hasattr(pipeline.named_steps["classifier"], "coef_")
+
+    def test_predict_proba_returns_valid_probabilities(
+        self,
+        synthetic_data: tuple[pd.DataFrame, pd.Series],
+    ) -> None:
+        X, y = synthetic_data
+        pipeline = build_baseline_pipeline(random_seed=42)
+        train_model(pipeline, X, y)
+        proba = pipeline.predict_proba(X)
+        assert proba.min() >= 0.0
+        assert proba.max() <= 1.0
+
+
+class TestCrossValidateModel:
+    def test_returns_expected_keys(
+        self,
+        synthetic_data: tuple[pd.DataFrame, pd.Series],
+    ) -> None:
+        X, y = synthetic_data
+        pipeline = build_baseline_pipeline(random_seed=42)
+        results = cross_validate_model(pipeline, X, y, cv_folds=3, random_seed=42)
+        assert "test_roc_auc" in results
+        assert "test_f1" in results
+
+    def test_per_fold_scores_length(
+        self,
+        synthetic_data: tuple[pd.DataFrame, pd.Series],
+    ) -> None:
+        X, y = synthetic_data
+        pipeline = build_baseline_pipeline(random_seed=42)
+        results = cross_validate_model(pipeline, X, y, cv_folds=3, random_seed=42)
+        assert len(results["test_roc_auc"]) == 3
+        assert len(results["test_f1"]) == 3
