@@ -22,7 +22,7 @@ conda activate mlops
 
 ```bash
 ruff check src/ tests/                 # lint
-mypy src/syrc                          # type-check
+mypy src/yield_risk                    # type-check
 
 pytest                                  # all tests
 pytest tests/test_file.py               # single file
