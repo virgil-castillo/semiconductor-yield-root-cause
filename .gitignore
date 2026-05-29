@@ -10,17 +10,35 @@ build/
 .venv/
 env/
 
-# Data & models
-data/
-models/
-*.pt
-*.pkl
-*.joblib
+# Data files — keep directory READMEs, ignore data artifacts
+data/**/*.csv
+data/**/*.txt
+data/**/*.parquet
+data/**/*.npy
+data/**/*.npz
+data/**/*.feather
+data/**/*.pkl
+
+# Model artifacts — keep README, ignore serialized models
+models/*.pkl
+models/*.joblib
+models/*.json
+models/*.bin
+
+# Reports — keep markdown, ignore generated figures
+reports/figures/*.png
+reports/figures/*.svg
+reports/figures/*.pdf
+reports/figures/*.html
 
 # Jupyter
 .ipynb_checkpoints/
-*.ipynb
+
+# ML experiment artifacts
+mlruns/
+*.log
 
 # Misc
 .env
 .DS_Store
+.vscode/
