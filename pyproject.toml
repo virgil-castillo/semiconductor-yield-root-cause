@@ -1,0 +1,77 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "semiconductor-yield-root-cause"
+version = "0.1.0"
+description = "Semiconductor yield root-cause analysis via time-series GRU and baseline models on CMAPSS turbofan sensor data."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "numpy",
+    "pandas>=2.0",
+    "pydantic>=2.0",
+    "pyyaml",
+    "scikit-learn",
+    "joblib",
+    "torch",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+    "types-pyyaml",
+    "pandas-stubs",
+    "kaggle",
+    "nbstripout",
+    "nbformat",
+    "jupyter",
+    "scipy",
+]
+
+[project.scripts]
+syrc-download-data = "syrc.cli.download_data:main"
+syrc-train-baseline = "syrc.cli.train_baseline:main"
+syrc-train-sequence-gru = "syrc.cli.train_sequence_gru:main"
+syrc-predict = "syrc.cli.predict:main"
+syrc-serve-api = "syrc.cli.serve_api:main"
+syrc-sweep-baseline-alpha = "syrc.experiments.baseline_alpha:main"
+syrc-compare-baseline-features = "syrc.experiments.baseline_feature_comparison:main"
+syrc-sweep-gru = "syrc.experiments.sequence_gru_sweep:main"
+syrc-sweep-feature-gru = "syrc.experiments.feature_gru_sweep:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "ANN"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+mypy_path = "src"
+packages = ["syrc"]
+
+[[tool.mypy.overrides]]
+module = "scipy.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "sklearn.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "joblib.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
