@@ -415,12 +415,11 @@ make report      # Generate figures and markdown reports
 ### Individual scripts
 
 ```bash
-python scripts/download_data.py          # Fetch raw data
-python scripts/make_dataset.py           # Build processed splits
-python scripts/train_model.py            # Train and save models
-python scripts/evaluate_model.py         # Produce evaluation report
-python scripts/generate_explanations.py  # SHAP + root-cause tables
-python scripts/batch_score.py --input path/to/wafers.csv
+python scripts/download_data.py       # Fetch raw data
+python scripts/preprocess_data.py     # Build processed train/test splits
+python scripts/train_baseline.py      # Train baseline LR, save model
+python scripts/evaluate_model.py      # Evaluate on test set, save metrics + figures
+python scripts/feature_importance.py  # Extract and save feature importance
 ```
 
 ### Tests
@@ -453,12 +452,10 @@ make docker-run
 
 ## Key results
 
-> *Results will be populated after the full pipeline is executed on the SECOM dataset.*
-
 | Model | PR-AUC | ROC-AUC | Recall (fail) | Balanced Acc | Cost @ opt. threshold |
 |-------|--------|---------|---------------|--------------|----------------------|
 | Dummy (stratified) | — | — | — | — | — |
-| Logistic Regression | — | — | — | — | — |
+| Logistic Regression | 0.160 | 0.656 | 0.238 | — | — |
 | Random Forest | — | — | — | — | — |
 | XGBoost | — | — | — | — | — |
 

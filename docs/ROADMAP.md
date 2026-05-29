@@ -21,7 +21,7 @@ Must be complete before any other phase.
 
 | Phase | Deliverable | Status |
 |-------|-------------|--------|
-| 0-A | `pyproject.toml`, `.gitignore`, `CLAUDE.md` updated for `yield_risk` | 🔄 |
+| 0-A | `pyproject.toml`, `.gitignore`, `CLAUDE.md` updated for `yield_risk` | ✅ |
 | 0-B | Directory skeleton (`src/`, `tests/`, `configs/`, `data/`, `models/`, `reports/`, `notebooks/`, `scripts/`, `app/`, `api/`, `docs/`) | ⬜ |
 | 0-C | `configs/config.yaml`, `configs/model_config.yaml`, `configs/cost_config.yaml` | ⬜ |
 | 0-D | `src/yield_risk/__init__.py`, `src/yield_risk/config.py` (config loader) | ⬜ |
@@ -34,13 +34,13 @@ Depends on: Tier 0
 
 | Phase | Deliverable | Key files | Status |
 |-------|-------------|-----------|--------|
-| 1-A | SECOM data acquisition | `scripts/download_data.py`, `data/raw/README.md` | ⬜ |
-| 1-B | Data loading + label joining | `src/yield_risk/data.py` | ⬜ |
-| 1-C | Schema validation | `src/yield_risk/validation.py` | ⬜ |
-| 1-D | Preprocessing pipeline | `src/yield_risk/preprocessing.py` | ⬜ |
+| 1-A | SECOM data acquisition | `scripts/download_data.py`, `data/raw/README.md` | ✅ |
+| 1-B | Data loading + label joining | `src/yield_risk/data.py` | ✅ |
+| 1-C | Schema validation | `src/yield_risk/validation.py` | ✅ |
+| 1-D | Preprocessing pipeline | `src/yield_risk/preprocessing.py` | ✅ |
 | 1-E | Feature engineering | `src/yield_risk/features.py` | ⬜ |
-| 1-F | Stratified split | `src/yield_risk/split.py` | ⬜ |
-| 1-G | `make_dataset` orchestration script | `scripts/make_dataset.py` | ⬜ |
+| 1-F | Stratified split | `src/yield_risk/split.py` | ✅ |
+| 1-G | `make_dataset` orchestration script | `scripts/make_dataset.py` | ✅ |
 
 **Tests:** `tests/test_data.py`, `tests/test_preprocessing.py`, `tests/test_features.py`
 
@@ -52,10 +52,10 @@ Depends on: Tier 1
 
 | Phase | Deliverable | Key files | Status |
 |-------|-------------|-----------|--------|
-| 2-A | Model training (dummy, LR, RF, XGB/LGBM) | `src/yield_risk/modeling.py` | ⬜ |
-| 2-B | Evaluation metrics (PR-AUC, ROC-AUC, balanced acc, false-pass/fail rates) | `src/yield_risk/evaluation.py` | ⬜ |
+| 2-A | Model training (dummy, LR, RF, XGB/LGBM) | `src/yield_risk/modeling.py` | ✅ |
+| 2-B | Evaluation metrics (PR-AUC, ROC-AUC, balanced acc, false-pass/fail rates) | `src/yield_risk/evaluation.py` | ✅ |
 | 2-C | Cost-sensitive threshold optimizer | `src/yield_risk/thresholding.py` | ⬜ |
-| 2-D | Train + evaluate scripts | `scripts/train_model.py`, `scripts/evaluate_model.py` | ⬜ |
+| 2-D | Train + evaluate scripts | `scripts/train_model.py`, `scripts/evaluate_model.py` | ✅ |
 | 2-E | Batch scoring script | `scripts/batch_score.py` | ⬜ |
 
 **Tests:** `tests/test_modeling.py`, `tests/test_thresholding.py`
