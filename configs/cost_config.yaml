@@ -1,0 +1,13 @@
+# Cost matrix for threshold optimization.
+# Units are arbitrary — only the ratio C_fn / C_fp matters for threshold selection.
+# Default: a missed failure costs 10x more than a false hold.
+cost_matrix:
+  true_pass: 0.0    # correctly released wafer
+  true_fail: 0.0    # correctly flagged wafer
+  false_fail: 1.0   # unnecessary hold / engineering review
+  false_pass: 10.0  # missed failure: downstream waste + quality escape
+
+threshold_search:
+  low: 0.01
+  high: 0.99
+  steps: 99

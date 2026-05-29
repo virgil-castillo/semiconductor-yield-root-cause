@@ -1,0 +1,16 @@
+paths:
+  raw_dir: data/raw
+  interim_dir: data/interim
+  processed_dir: data/processed
+  models_dir: models
+  reports_dir: reports
+  figures_dir: reports/figures
+
+run:
+  random_seed: 42
+  test_size: 0.20
+  val_size: 0.10
+  cv_folds: 5
+  missing_threshold: 0.60    # drop features with > 60% missing values
+  variance_threshold: 0.01   # drop near-constant features below this variance
+  correlation_threshold: 0.95  # drop one of each pair with |r| > threshold
