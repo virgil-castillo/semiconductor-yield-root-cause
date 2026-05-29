@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
+from yield_risk.config import RunConfig
+
 _NON_SENSOR: frozenset[str] = frozenset({"label", "timestamp"})
 
 
@@ -109,3 +111,31 @@ def split_stratified(
         stratify=df["label"],
     )
     return cast(pd.DataFrame, splits[0]), cast(pd.DataFrame, splits[1])
+
+
+def run_preprocessing(
+    df: pd.DataFrame,
+    run_cfg: RunConfig,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Apply feature selection, imputation, and stratified train/test split.
+
+    Pipeline order:
+    1. drop_high_missing(df, run_cfg.missing_threshold)
+    2. impute_median(result)
+    3. drop_low_variance(result, run_cfg.variance_threshold)
+    4. drop_high_correlation(result, run_cfg.correlation_threshold)
+    5. split_stratified(result, run_cfg.test_size, run_cfg.random_seed)
+
+    Args:
+        df: Raw SECOM DataFrame (output of load_secom, already validated).
+        run_cfg: RunConfig with thresholds and split parameters.
+
+    Returns:
+        Tuple of (train_df, test_df). Both contain sensor columns, label,
+        and timestamp. No NaN values in sensor columns.
+    """
+    result = drop_high_missing(df, run_cfg.missing_threshold)
+    result = impute_median(result)
+    result = drop_low_variance(result, run_cfg.variance_threshold)
+    result = drop_high_correlation(result, run_cfg.correlation_threshold)
+    return split_stratified(result, run_cfg.test_size, run_cfg.random_seed)
