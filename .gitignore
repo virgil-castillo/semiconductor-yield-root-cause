@@ -12,6 +12,7 @@ env/
 
 # Data files — keep directory READMEs, ignore data artifacts
 data/**/*.csv
+data/**/*.data
 data/**/*.txt
 data/**/*.parquet
 data/**/*.npy
