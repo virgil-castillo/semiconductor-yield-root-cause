@@ -29,6 +29,9 @@ def main() -> None:
     - ``shap_values.npz``: raw SHAP values for the test set
     - ``shap_global_importance.csv``: mean |SHAP| per feature, sorted
     - ``root_cause_candidates.csv``: sensors ranked by composite score
+
+    Raises:
+        ValueError: If the processed test CSV contains no sensor_ columns.
     """
     cfg = load_config()
 
@@ -39,6 +42,11 @@ def main() -> None:
     train = pd.read_csv(cfg.paths.processed_dir / "train.csv")
     test = pd.read_csv(cfg.paths.processed_dir / "test.csv")
     sensor_cols = [c for c in test.columns if c.startswith("sensor_")]
+    if not sensor_cols:
+        raise ValueError(
+            "No columns starting with 'sensor_' found in test.csv. "
+            "Verify the processed data has the expected schema."
+        )
 
     X_train = train[sensor_cols]
     X_test = test[sensor_cols]
