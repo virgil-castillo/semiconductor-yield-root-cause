@@ -110,6 +110,18 @@ class TestFailShapLift:
         abs_lifts = result["shap_lift"].abs().tolist()
         assert abs_lifts == sorted(abs_lifts, reverse=True)
 
+    def test_all_fail_raises(self) -> None:
+        exp = _make_explanations()
+        y = np.ones(20, dtype=int)
+        with pytest.raises(ValueError, match="no passing samples"):
+            fail_shap_lift(exp, y)
+
+    def test_all_pass_raises(self) -> None:
+        exp = _make_explanations()
+        y = np.zeros(20, dtype=int)
+        with pytest.raises(ValueError, match="no failing samples"):
+            fail_shap_lift(exp, y)
+
 
 class TestRankRootCauseCandidates:
     @pytest.fixture()
@@ -176,3 +188,18 @@ class TestRankRootCauseCandidates:
         global_imp, lift_df, flag_rates = inputs
         result = rank_root_cause_candidates(global_imp, lift_df, flag_rates)
         assert len(result) == 4
+
+    def test_sensor_missing_from_lift_df_gets_zero_lift(
+        self, inputs: tuple[pd.DataFrame, pd.DataFrame, pd.Series]
+    ) -> None:
+        global_imp, lift_df, flag_rates = inputs
+        # Remove one sensor from lift_df
+        partial_lift = lift_df[lift_df["feature"] != "sensor_003"].copy()
+        result = rank_root_cause_candidates(global_imp, partial_lift, flag_rates)
+        # sensor_003 should have shap_lift=0.0, not NaN
+        row = result[result["sensor"] == "sensor_003"]
+        assert len(row) == 1
+        assert not pd.isna(row["shap_lift"].iloc[0])
+        assert row["shap_lift"].iloc[0] == pytest.approx(0.0)
+        # composite score must also be non-NaN
+        assert not pd.isna(row["composite_score"].iloc[0])

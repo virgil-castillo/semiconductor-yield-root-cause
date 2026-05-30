@@ -57,10 +57,18 @@ def fail_shap_lift(
         - ``shap_lift``: ``fail_mean_shap - pass_mean_shap``
 
         Sorted by ``|shap_lift|`` descending, index reset to 0..N-1.
+
+    Raises:
+        ValueError: If *y_true* contains no failing samples or no passing samples.
     """
     sv = explanations.shap_values
     fail_mask = y_true == 1
     pass_mask = ~fail_mask
+
+    if not fail_mask.any():
+        raise ValueError("y_true contains no failing samples (label=1).")
+    if not pass_mask.any():
+        raise ValueError("y_true contains no passing samples (label=0).")
 
     fail_mean = sv[fail_mask].mean(axis=0)
     pass_mean = sv[pass_mask].mean(axis=0)
@@ -144,6 +152,7 @@ def rank_root_cause_candidates(
         }
     )
     merged = merged.merge(flag_df, on="feature", how="left")
+    merged["shap_lift"] = merged["shap_lift"].fillna(0.0)
     merged["spc_flag_rate"] = merged["spc_flag_rate"].fillna(0.0)
 
     merged["composite_score"] = (
