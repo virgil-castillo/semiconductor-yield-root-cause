@@ -32,10 +32,18 @@ def score_batch(
     Returns:
         DataFrame written to *output_path*, including all original columns
         plus ``score`` and ``predicted_label``.
+
+    Raises:
+        ValueError: If the input CSV contains no sensor_ columns.
     """
     pipeline = joblib.load(model_path)
     df = pd.read_csv(input_path)
     sensor_cols = [c for c in df.columns if c.startswith("sensor_")]
+    if not sensor_cols:
+        raise ValueError(
+            f"No columns starting with 'sensor_' found in {input_path}. "
+            "Verify the input CSV has the expected schema."
+        )
     X = df[sensor_cols]
     scores = pipeline.predict_proba(X)[:, 1]
     result = df.copy()
