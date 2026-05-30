@@ -100,10 +100,17 @@ def compute_shap_values(
             f" TreeExplainer (feature_importances_)."
         )
 
-    if isinstance(sv, list):
-        shap_vals: np.ndarray = sv[1]
+    # Normalize to positive-class 2-D array: (n_samples, n_features)
+    if isinstance(sv, np.ndarray) and sv.ndim == 3:
+        # SHAP >= 0.45 TreeExplainer binary: (n_samples, n_features, n_classes)
+        shap_vals: np.ndarray = sv[:, :, 1]
+        base = float(ev[1]) if hasattr(ev, "__len__") else float(ev)
+    elif isinstance(sv, list):
+        # Legacy SHAP format: list of [class_0_array, class_1_array]
+        shap_vals = sv[1]
         base = float(ev[1]) if hasattr(ev, "__len__") else float(ev)
     else:
+        # LinearExplainer: 2-D array already
         shap_vals = sv
         base = float(ev[1]) if hasattr(ev, "__len__") else float(ev)
 

@@ -63,6 +63,31 @@ def explain_data() -> pd.DataFrame:
 
 
 @pytest.fixture()
+def tree_pipeline() -> Pipeline:
+    """3-feature RandomForestClassifier pipeline fitted on 50 samples."""
+    from sklearn.ensemble import RandomForestClassifier
+
+    rng = np.random.default_rng(3)
+    X = pd.DataFrame(
+        rng.normal(size=(50, 3)),
+        columns=["sensor_000", "sensor_001", "sensor_002"],
+    )
+    y = pd.Series([0] * 42 + [1] * 8)
+    pipe = Pipeline(
+        [
+            (
+                "classifier",
+                RandomForestClassifier(
+                    n_estimators=10, random_state=0, class_weight="balanced"
+                ),
+            ),
+        ]
+    )
+    pipe.fit(X, y)
+    return pipe
+
+
+@pytest.fixture()
 def explanations(
     tiny_pipeline: Pipeline,
     background_data: pd.DataFrame,
@@ -192,3 +217,48 @@ class TestSaveLoadShapValues:
         out = tmp_path / "shap.npz"
         save_shap_values(explanations, out)
         assert out.exists()
+
+
+class TestTreeExplainerDispatch:
+    def test_tree_pipeline_returns_shap_explanations(
+        self,
+        tree_pipeline: Pipeline,
+        background_data: pd.DataFrame,
+        explain_data: pd.DataFrame,
+    ) -> None:
+        result = compute_shap_values(tree_pipeline, background_data, explain_data)
+        assert isinstance(result, ShapExplanations)
+
+    def test_tree_shap_values_shape(
+        self,
+        tree_pipeline: Pipeline,
+        background_data: pd.DataFrame,
+        explain_data: pd.DataFrame,
+    ) -> None:
+        result = compute_shap_values(tree_pipeline, background_data, explain_data)
+        # Must be 2D: (n_explain_samples, n_features)
+        assert result.shap_values.ndim == 2
+        assert result.shap_values.shape == (10, 3)
+
+    def test_tree_global_importance_works(
+        self,
+        tree_pipeline: Pipeline,
+        background_data: pd.DataFrame,
+        explain_data: pd.DataFrame,
+    ) -> None:
+        result = compute_shap_values(tree_pipeline, background_data, explain_data)
+        importance = global_feature_importance(result)
+        assert "mean_abs_shap" in importance.columns
+        assert (importance["mean_abs_shap"] >= 0).all()
+
+    def test_tree_local_explanation_works(
+        self,
+        tree_pipeline: Pipeline,
+        background_data: pd.DataFrame,
+        explain_data: pd.DataFrame,
+    ) -> None:
+        result = compute_shap_values(tree_pipeline, background_data, explain_data)
+        local = local_explanation(result, row_idx=0)
+        assert "shap_value" in local.columns
+        abs_vals = local["shap_value"].abs().tolist()
+        assert abs_vals == sorted(abs_vals, reverse=True)
