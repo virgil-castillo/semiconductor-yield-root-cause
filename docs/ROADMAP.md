@@ -22,9 +22,9 @@ Must be complete before any other phase.
 | Phase | Deliverable | Status |
 |-------|-------------|--------|
 | 0-A | `pyproject.toml`, `.gitignore`, `CLAUDE.md` updated for `yield_risk` | ✅ |
-| 0-B | Directory skeleton (`src/`, `tests/`, `configs/`, `data/`, `models/`, `reports/`, `notebooks/`, `scripts/`, `app/`, `api/`, `docs/`) | ⬜ |
-| 0-C | `configs/config.yaml`, `configs/model_config.yaml`, `configs/cost_config.yaml` | ⬜ |
-| 0-D | `src/yield_risk/__init__.py`, `src/yield_risk/config.py` (config loader) | ⬜ |
+| 0-B | Directory skeleton (`src/`, `tests/`, `configs/`, `data/`, `models/`, `reports/`, `notebooks/`, `scripts/`, `app/`, `api/`, `docs/`) | ✅ |
+| 0-C | `configs/config.yaml`, `configs/model_config.yaml`, `configs/cost_config.yaml` | ✅ |
+| 0-D | `src/yield_risk/__init__.py`, `src/yield_risk/config.py` (config loader) | ✅ |
 
 ---
 
