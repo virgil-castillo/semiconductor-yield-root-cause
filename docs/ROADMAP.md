@@ -119,8 +119,8 @@ Depends on: Tier 1 (notebooks 01–03), Tier 2 (04), Tier 3 (05–06), Tier 4 (0
 
 | Phase | Deliverable | File | Status |
 |-------|-------------|------|--------|
-| 7-A | Data understanding | `notebooks/01_data_understanding.ipynb` | ⬜ |
-| 7-B | EDA — yield patterns | `notebooks/02_eda_yield_patterns.ipynb` | ⬜ |
+| 7-A | EDA — data characterisation and preprocessing config justification (`missing_threshold`, `variance_threshold`, `correlation_threshold`) | `notebooks/01_eda.ipynb` | ✅ |
+| 7-B | EDA — sensor-level failure signals for Tier 3 explainability (point-biserial correlation, pass/fail distributions, SHAP hypotheses) | `notebooks/02_eda_yield_patterns.ipynb` | ⬜ |
 | 7-C | Feature engineering walkthrough | `notebooks/03_feature_engineering.ipynb` | ⬜ |
 | 7-D | Model training + evaluation | `notebooks/04_model_training_evaluation.ipynb` | ⬜ |
 | 7-E | Root-cause analysis | `notebooks/05_root_cause_analysis.ipynb` | ⬜ |
