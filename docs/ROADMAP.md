@@ -38,7 +38,7 @@ Depends on: Tier 0
 | 1-B | Data loading + label joining | `src/yield_risk/data.py` | ✅ |
 | 1-C | Schema validation | `src/yield_risk/validation.py` | ✅ |
 | 1-D | Preprocessing pipeline | `src/yield_risk/preprocessing.py` | ✅ |
-| 1-E | Feature engineering | `src/yield_risk/features.py` | ⬜ |
+| 1-E | Feature engineering | `src/yield_risk/features.py` | ✅ |
 | 1-F | Stratified split | `src/yield_risk/split.py` | ✅ |
 | 1-G | `make_dataset` orchestration script | `scripts/make_dataset.py` | ✅ |
 
@@ -54,9 +54,9 @@ Depends on: Tier 1
 |-------|-------------|-----------|--------|
 | 2-A | Model training (dummy, LR, RF, XGB/LGBM) | `src/yield_risk/modeling.py` | ✅ |
 | 2-B | Evaluation metrics (PR-AUC, ROC-AUC, balanced acc, false-pass/fail rates) | `src/yield_risk/evaluation.py` | ✅ |
-| 2-C | Cost-sensitive threshold optimizer | `src/yield_risk/thresholding.py` | ⬜ |
+| 2-C | Cost-sensitive threshold optimizer | `src/yield_risk/thresholding.py` | ✅ |
 | 2-D | Train + evaluate scripts | `scripts/train_model.py`, `scripts/evaluate_model.py` | ✅ |
-| 2-E | Batch scoring script | `scripts/batch_score.py` | ⬜ |
+| 2-E | Batch scoring script | `scripts/batch_score.py` | ✅ |
 
 **Tests:** `tests/test_modeling.py`, `tests/test_thresholding.py`
 
@@ -68,9 +68,9 @@ Depends on: Tier 2
 
 | Phase | Deliverable | Key files | Status |
 |-------|-------------|-----------|--------|
-| 3-A | SHAP global + local explanations | `src/yield_risk/explainability.py` | ⬜ |
-| 3-B | Root-cause candidate ranking (SPC checks, outlier freq, pass/fail distributions) | `src/yield_risk/root_cause.py` | ⬜ |
-| 3-C | Explanation generation script | `scripts/generate_explanations.py` | ⬜ |
+| 3-A | SHAP global + local explanations | `src/yield_risk/explainability.py` | ✅ |
+| 3-B | Root-cause candidate ranking (SPC checks, outlier freq, pass/fail distributions) | `src/yield_risk/root_cause.py` | ✅ |
+| 3-C | Explanation generation script | `scripts/generate_explanations.py` | ✅ |
 
 ---
 
@@ -120,7 +120,7 @@ Depends on: Tier 1 (notebooks 01–03), Tier 2 (04), Tier 3 (05–06), Tier 4 (0
 | Phase | Deliverable | File | Status |
 |-------|-------------|------|--------|
 | 7-A | EDA — data characterisation and preprocessing config justification (`missing_threshold`, `variance_threshold`, `correlation_threshold`) | `notebooks/01_eda.ipynb` | ✅ |
-| 7-B | EDA — sensor-level failure signals for Tier 3 explainability (point-biserial correlation, pass/fail distributions, SHAP hypotheses) | `notebooks/02_eda_yield_patterns.ipynb` | ⬜ |
+| 7-B | EDA — sensor-level failure signals for Tier 3 explainability (point-biserial correlation, pass/fail distributions, SHAP hypotheses) | `notebooks/02_eda_yield_patterns.ipynb` | ✅ |
 | 7-C | Feature engineering walkthrough | `notebooks/03_feature_engineering.ipynb` | ⬜ |
 | 7-D | Model training + evaluation | `notebooks/04_model_training_evaluation.ipynb` | ⬜ |
 | 7-E | Root-cause analysis | `notebooks/05_root_cause_analysis.ipynb` | ⬜ |
