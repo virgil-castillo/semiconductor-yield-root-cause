@@ -196,3 +196,118 @@ def build_pipeline(name: str, random_seed: int) -> Pipeline:
         steps.append(("scaler", StandardScaler()))
     steps.append(("classifier", spec.build(random_seed)))
     return Pipeline(steps)
+
+
+@dataclass
+class SearchResult:
+    """Outcome of tuning one model family.
+
+    Attributes:
+        name: Family identifier.
+        estimator: Refit best pipeline (fitted on all of X, y).
+        cv_pr_auc_mean: Mean cross-validated PR-AUC (average precision).
+        cv_pr_auc_std: Standard deviation of cross-validated PR-AUC.
+        best_params: Chosen hyperparameters (classifier__*), empty for dummy.
+    """
+
+    name: str
+    estimator: Pipeline
+    cv_pr_auc_mean: float
+    cv_pr_auc_std: float
+    best_params: dict[str, Any]
+
+
+def _param_distributions(grid: dict[str, Any]) -> dict[str, list[Any]]:
+    """Build RandomizedSearchCV distributions from a family grid.
+
+    Only list-valued entries are searched; scalar entries (e.g. a fixed
+    max_iter) are baked into the estimator factory and ignored here. Keys are
+    prefixed with ``classifier__`` to target the pipeline's final step.
+
+    Args:
+        grid: Per-family hyperparameter grid from model_config.yaml.
+
+    Returns:
+        Mapping of ``classifier__<param>`` to a list of candidate values.
+    """
+    return {
+        f"classifier__{key}": value
+        for key, value in grid.items()
+        if isinstance(value, list)
+    }
+
+
+def run_search(
+    name: str,
+    X: pd.DataFrame,
+    y: pd.Series,
+    model_cfg: dict[str, Any],
+    cv_folds: int,
+    random_seed: int,
+    n_jobs: int = -1,
+) -> SearchResult:
+    """Tune one model family with cross-validated PR-AUC and refit the winner.
+
+    Tunable families are searched with RandomizedSearchCV; ``n_iter`` is capped
+    at the size of the discrete grid so small grids do not raise. The dummy
+    family has no grid: it is fit directly and scored with cross_val_score so it
+    still appears as the chance floor. For XGBoost, ``scale_pos_weight`` is set
+    from the training class ratio before searching.
+
+    Args:
+        name: Registered family identifier.
+        X: Training feature matrix.
+        y: Training labels (0/1).
+        model_cfg: Parsed model_config.yaml (keys ``models`` and ``search``).
+        cv_folds: Number of stratified folds.
+        random_seed: Random state for CV and the estimator.
+        n_jobs: Parallel jobs for the search (bound to the CPU allocation).
+
+    Returns:
+        SearchResult with the refit best estimator and its CV PR-AUC.
+    """
+    spec = MODEL_REGISTRY[name]
+    pipeline = build_pipeline(name, random_seed)
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_seed)
+
+    if name == "xgboost":
+        n_pos = int((y == 1).sum())
+        n_neg = int((y == 0).sum())
+        scale = (n_neg / n_pos) if n_pos else 1.0
+        pipeline.set_params(classifier__scale_pos_weight=scale)
+
+    if not spec.tunable:
+        scores = cross_val_score(pipeline, X, y, cv=cv, scoring="average_precision")
+        pipeline.fit(X, y)
+        return SearchResult(
+            name=name,
+            estimator=pipeline,
+            cv_pr_auc_mean=float(scores.mean()),
+            cv_pr_auc_std=float(scores.std()),
+            best_params={},
+        )
+
+    grid = model_cfg["models"][name]
+    search_cfg = model_cfg["search"]
+    distributions = _param_distributions(grid)
+    n_combos = prod(len(v) for v in distributions.values()) if distributions else 1
+    n_iter = min(int(search_cfg["n_iter"]), n_combos)
+    search = RandomizedSearchCV(
+        pipeline,
+        param_distributions=distributions,
+        n_iter=n_iter,
+        scoring="average_precision",
+        cv=cv,
+        n_jobs=n_jobs,
+        refit=True,
+        random_state=random_seed,
+    )
+    search.fit(X, y)
+    std = float(search.cv_results_["std_test_score"][search.best_index_])
+    return SearchResult(
+        name=name,
+        estimator=cast(Pipeline, search.best_estimator_),
+        cv_pr_auc_mean=float(search.best_score_),
+        cv_pr_auc_std=std,
+        best_params=dict(search.best_params_),
+    )

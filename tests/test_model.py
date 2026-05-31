@@ -9,9 +9,11 @@ from sklearn.preprocessing import StandardScaler
 
 from yield_risk.model import (
     MODEL_REGISTRY,
+    SearchResult,
     build_baseline_pipeline,
     build_pipeline,
     cross_validate_model,
+    run_search,
     train_model,
 )
 
@@ -118,3 +120,79 @@ class TestModelRegistry:
     def test_every_pipeline_has_classifier_step(self) -> None:
         for name in MODEL_REGISTRY:
             assert "classifier" in build_pipeline(name, random_seed=42).named_steps
+
+
+_TINY_MODEL_CFG: dict[str, object] = {
+    "models": {
+        "logistic_regression": {
+            "C": [0.1, 1.0],
+            "max_iter": 1000,
+            "class_weight": "balanced",
+        },
+        "random_forest": {"n_estimators": [10, 20], "max_depth": [3, 5]},
+        "xgboost": {"n_estimators": [10, 20], "max_depth": [2, 3]},
+    },
+    "search": {
+        "n_iter": 20,
+        "scoring": "average_precision",
+        "cv_folds": 3,
+        "n_jobs": 1,
+        "refit": True,
+    },
+}
+
+
+class TestRunSearch:
+    def test_returns_fitted_estimator(
+        self, synthetic_data: tuple[pd.DataFrame, pd.Series]
+    ) -> None:
+        X, y = synthetic_data
+        result = run_search(
+            "random_forest", X, y, _TINY_MODEL_CFG, cv_folds=3,
+            random_seed=42, n_jobs=1,
+        )
+        assert isinstance(result, SearchResult)
+        proba = result.estimator.predict_proba(X)
+        assert proba.shape == (100, 2)
+
+    def test_cv_score_is_a_probability(
+        self, synthetic_data: tuple[pd.DataFrame, pd.Series]
+    ) -> None:
+        X, y = synthetic_data
+        result = run_search(
+            "random_forest", X, y, _TINY_MODEL_CFG, cv_folds=3,
+            random_seed=42, n_jobs=1,
+        )
+        assert 0.0 <= result.cv_pr_auc_mean <= 1.0
+
+    def test_best_params_are_classifier_prefixed(
+        self, synthetic_data: tuple[pd.DataFrame, pd.Series]
+    ) -> None:
+        X, y = synthetic_data
+        result = run_search(
+            "random_forest", X, y, _TINY_MODEL_CFG, cv_folds=3,
+            random_seed=42, n_jobs=1,
+        )
+        assert all(k.startswith("classifier__") for k in result.best_params)
+
+    def test_small_grid_does_not_raise_when_n_iter_exceeds_combos(
+        self, synthetic_data: tuple[pd.DataFrame, pd.Series]
+    ) -> None:
+        # logistic_regression grid has only 2 combos but n_iter is 20.
+        X, y = synthetic_data
+        result = run_search(
+            "logistic_regression", X, y, _TINY_MODEL_CFG, cv_folds=3,
+            random_seed=42, n_jobs=1,
+        )
+        assert result.name == "logistic_regression"
+
+    def test_dummy_has_empty_best_params(
+        self, synthetic_data: tuple[pd.DataFrame, pd.Series]
+    ) -> None:
+        X, y = synthetic_data
+        result = run_search(
+            "dummy", X, y, _TINY_MODEL_CFG, cv_folds=3,
+            random_seed=42, n_jobs=1,
+        )
+        assert result.best_params == {}
+        assert hasattr(result.estimator.named_steps["classifier"], "predict_proba")
