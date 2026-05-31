@@ -237,6 +237,21 @@ def _param_distributions(grid: dict[str, Any]) -> dict[str, list[Any]]:
     }
 
 
+def select_best(results: list[SearchResult]) -> str:
+    """Return the family name with the highest mean cross-validated PR-AUC.
+
+    Ties break toward the family appearing first in *results* (which callers
+    pass in registry order).
+
+    Args:
+        results: Per-family search results.
+
+    Returns:
+        The winning family's name.
+    """
+    return max(results, key=lambda r: r.cv_pr_auc_mean).name
+
+
 def run_search(
     name: str,
     X: pd.DataFrame,

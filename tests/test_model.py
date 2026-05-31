@@ -14,6 +14,7 @@ from yield_risk.model import (
     build_pipeline,
     cross_validate_model,
     run_search,
+    select_best,
     train_model,
 )
 
@@ -196,3 +197,20 @@ class TestRunSearch:
         )
         assert result.best_params == {}
         assert hasattr(result.estimator.named_steps["classifier"], "predict_proba")
+
+
+class TestSelectBest:
+    def test_returns_family_with_highest_mean(self) -> None:
+        results = [
+            SearchResult("a", build_pipeline("dummy", 42), 0.20, 0.0, {}),
+            SearchResult("b", build_pipeline("dummy", 42), 0.55, 0.0, {}),
+            SearchResult("c", build_pipeline("dummy", 42), 0.40, 0.0, {}),
+        ]
+        assert select_best(results) == "b"
+
+    def test_ties_break_toward_first(self) -> None:
+        results = [
+            SearchResult("first", build_pipeline("dummy", 42), 0.50, 0.0, {}),
+            SearchResult("second", build_pipeline("dummy", 42), 0.50, 0.0, {}),
+        ]
+        assert select_best(results) == "first"
