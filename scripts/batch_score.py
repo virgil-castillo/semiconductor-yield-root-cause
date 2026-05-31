@@ -60,7 +60,7 @@ def main() -> None:
     parser.add_argument(
         "--model",
         type=Path,
-        default=Path("models/baseline_lr.joblib"),
+        default=Path("models/selected_model.joblib"),
         help="Path to joblib model file.",
     )
     parser.add_argument(

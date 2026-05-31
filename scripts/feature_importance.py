@@ -12,7 +12,7 @@ def main() -> None:
     """Extract and visualize feature importance from the baseline model."""
     cfg = load_config()
     test = pd.read_csv(cfg.paths.processed_dir / "test.csv")
-    pipeline = joblib.load(cfg.paths.models_dir / "baseline_lr.joblib")
+    pipeline = joblib.load(cfg.paths.models_dir / "selected_model.joblib")
     sensor_cols = [c for c in test.columns if c.startswith("sensor_")]
     importance_df = extract_lr_coefficients(pipeline, sensor_cols)
     cfg.paths.reports_dir.mkdir(parents=True, exist_ok=True)

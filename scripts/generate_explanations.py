@@ -22,7 +22,7 @@ from yield_risk.root_cause import (
 def main() -> None:
     """Generate SHAP explanations and root-cause report.
 
-    Loads the fitted baseline model and processed train/test splits from
+    Loads the selected model and processed train/test splits from
     paths defined in ``configs/config.yaml``.  Saves three artefacts to
     ``reports/``:
 
@@ -35,7 +35,7 @@ def main() -> None:
     """
     cfg = load_config()
 
-    model_path: Path = cfg.paths.models_dir / "baseline_lr.joblib"
+    model_path: Path = cfg.paths.models_dir / "selected_model.joblib"
     pipeline = joblib.load(model_path)
     print(f"Loaded model from {model_path}")
 
