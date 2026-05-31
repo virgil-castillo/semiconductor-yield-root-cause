@@ -8,7 +8,9 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 from yield_risk.model import (
+    MODEL_REGISTRY,
     build_baseline_pipeline,
+    build_pipeline,
     cross_validate_model,
     train_model,
 )
@@ -90,3 +92,29 @@ class TestCrossValidateModel:
         results = cross_validate_model(pipeline, X, y, cv_folds=3, random_seed=42)
         assert len(results["test_roc_auc"]) == 3
         assert len(results["test_f1"]) == 3
+
+
+class TestModelRegistry:
+    def test_registry_has_four_families(self) -> None:
+        assert set(MODEL_REGISTRY) == {
+            "dummy",
+            "logistic_regression",
+            "random_forest",
+            "xgboost",
+        }
+
+    def test_logistic_regression_pipeline_has_scaler(self) -> None:
+        pipeline = build_pipeline("logistic_regression", random_seed=42)
+        assert "scaler" in pipeline.named_steps
+
+    def test_random_forest_pipeline_has_no_scaler(self) -> None:
+        pipeline = build_pipeline("random_forest", random_seed=42)
+        assert "scaler" not in pipeline.named_steps
+
+    def test_dummy_pipeline_has_no_scaler(self) -> None:
+        pipeline = build_pipeline("dummy", random_seed=42)
+        assert "scaler" not in pipeline.named_steps
+
+    def test_every_pipeline_has_classifier_step(self) -> None:
+        for name in MODEL_REGISTRY:
+            assert "classifier" in build_pipeline(name, random_seed=42).named_steps
