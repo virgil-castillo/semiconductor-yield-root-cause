@@ -31,6 +31,7 @@ reports/figures/*.png
 reports/figures/*.svg
 reports/figures/*.pdf
 reports/figures/*.html
+reports/*.npz
 
 # Jupyter
 .ipynb_checkpoints/
@@ -43,3 +44,6 @@ mlruns/
 .env
 .DS_Store
 .vscode/
+
+# Local scratch files
+tmp/
