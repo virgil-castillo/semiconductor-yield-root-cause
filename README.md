@@ -90,6 +90,12 @@ for acquisition instructions.
 
 ## Repository structure
 
+The tree below is the target production-style structure. In the current repo,
+the implemented pieces are the data pipeline, baseline logistic-regression
+model, evaluation, feature importance, SHAP/root-cause ranking, batch scoring,
+and notebooks through root-cause analysis. API, dashboard, monitoring/reporting
+utilities, Makefile, Docker, and CI remain planned work.
+
 ```
 semiconductor-yield-root-cause/
 │
@@ -118,41 +124,41 @@ semiconductor-yield-root-cause/
 │   └── processed/README.md         # Final train/val/test splits
 │
 ├── notebooks/
-│   ├── 01_data_understanding.ipynb
+│   ├── 01_eda.ipynb
 │   ├── 02_eda_yield_patterns.ipynb
-│   ├── 03_feature_engineering.ipynb
+│   ├── 03_baseline_results.ipynb
 │   ├── 04_model_training_evaluation.ipynb
 │   ├── 05_root_cause_analysis.ipynb
-│   ├── 06_cost_sensitive_thresholding.ipynb
-│   └── 07_model_monitoring_drift_checks.ipynb
+│   ├── 06_cost_sensitive_thresholding.ipynb  # Planned
+│   └── 07_model_monitoring_drift_checks.ipynb # Planned
 │
 ├── src/yield_risk/                  # Core library — importable package
 │   ├── __init__.py
 │   ├── config.py                    # Config loader (YAML → dataclass)
 │   ├── data.py                      # SECOM loader, label join, renaming
 │   ├── validation.py                # Schema and data-quality checks
-│   ├── preprocessing.py             # sklearn Pipeline: imputation, scaling
-│   ├── features.py                  # Feature selection, missingness indicators
-│   ├── split.py                     # Stratified train/val/test split
-│   ├── modeling.py                  # Model registry, training, CV
-│   ├── evaluation.py                # Metrics, confusion matrix, PR/ROC curves
+│   ├── preprocess.py                # Imputation, filtering, split pipeline
+│   ├── features.py                  # Aggregate features and interactions
+│   ├── model.py                     # Baseline LR training and CV
+│   ├── evaluate.py                  # Metrics, confusion matrix, PR/ROC curves
+│   ├── importance.py                # LR coefficient importance
 │   ├── thresholding.py              # Cost-sensitive threshold search
 │   ├── explainability.py            # SHAP global + local explanations
 │   ├── root_cause.py                # Candidate ranking, SPC checks, distributions
-│   ├── monitoring.py                # Feature drift, missingness drift, pred dist
-│   └── reporting.py                 # Figure generation, markdown report helpers
+│   ├── monitoring.py                # Planned
+│   └── reporting.py                 # Planned
 │
 ├── scripts/
 │   ├── download_data.py             # Fetch SECOM files from UCI
-│   ├── make_dataset.py              # Raw → interim → processed pipeline
-│   ├── train_model.py               # Train all models, save artifacts
+│   ├── preprocess_data.py           # Raw → processed train/test pipeline
+│   ├── train_baseline.py            # Train baseline LR, save artifact
 │   ├── evaluate_model.py            # Load artifact, produce eval report
 │   ├── generate_explanations.py     # SHAP values + root-cause tables
-│   ├── generate_reports.py          # Markdown + figure outputs
+│   ├── feature_importance.py        # LR coefficient importance export
 │   └── batch_score.py               # Score a new batch of wafer records
 │
 ├── app/
-│   ├── streamlit_app.py             # Entry point; shared state + navigation
+│   ├── streamlit_app.py             # Planned
 │   └── pages/
 │       ├── 1_Batch_Scoring.py       # Upload → score → export
 │       ├── 2_Root_Cause_Triage.py   # SHAP plots, feature distributions
@@ -160,8 +166,8 @@ semiconductor-yield-root-cause/
 │       └── 4_Model_Monitoring.py    # Drift summary, prediction trend
 │
 ├── api/
-│   ├── main.py                      # FastAPI app: /health, /predict, /predict/batch
-│   └── schemas.py                   # Pydantic request/response models
+│   ├── main.py                      # Planned
+│   └── schemas.py                   # Planned
 │
 ├── models/
 │   └── README.md                    # Artifact naming conventions
@@ -328,8 +334,8 @@ automatically recomputes the recommendation without retraining.
 
 ## Dashboard
 
-A multi-page Streamlit application provides an interactive interface to the
-trained system.
+A multi-page Streamlit application is planned to provide an interactive
+interface to the trained system.
 
 | Page | Function |
 |------|----------|
@@ -340,16 +346,16 @@ trained system.
 
 **Screenshots**
 
-> *Run `make app` and navigate to `http://localhost:8501` to view the dashboard.
-> Screenshots will be added here after the pipeline is fully executed.*
+> Screenshots will be added here after the dashboard is implemented.
 
 ---
 
 ## API
 
-A FastAPI service exposes the trained model for programmatic scoring.
+A FastAPI service is planned to expose the trained model for programmatic
+scoring.
 
-**Start the server:**
+**Planned server command:**
 
 ```bash
 uvicorn api.main:app --host 0.0.0.0 --port 8000
@@ -383,7 +389,8 @@ curl -X POST http://localhost:8000/predict \
 }
 ```
 
-Full schema definitions are in [`api/schemas.py`](api/schemas.py).
+Full schema definitions will live in `api/schemas.py` when the API is
+implemented.
 
 ---
 
@@ -396,20 +403,20 @@ Full schema definitions are in [`api/schemas.py`](api/schemas.py).
 
 ### Setup
 
-```bash
-# Install the package and dev dependencies
-make install
-
-# Download the SECOM dataset from UCI
-make data
+```powershell
+. "$env:USERPROFILE\miniconda3\shell\condabin\conda-hook.ps1"
+conda activate mlops
 ```
 
 ### Full pipeline
 
 ```bash
-make train       # Train all models, save artifacts to models/
-make evaluate    # Evaluate on test set, write reports/
-make report      # Generate figures and markdown reports
+python scripts/download_data.py
+python scripts/preprocess_data.py
+python scripts/train_baseline.py
+python scripts/evaluate_model.py
+python scripts/feature_importance.py
+python scripts/generate_explanations.py
 ```
 
 ### Individual scripts
@@ -425,28 +432,21 @@ python scripts/feature_importance.py  # Extract and save feature importance
 ### Tests
 
 ```bash
-make test        # Full test suite
+pytest           # Full test suite
 pytest tests/test_data.py -v    # Single module
 ```
 
 ### Dashboard
 
-```bash
-make app         # Launches Streamlit on http://localhost:8501
-```
+Not yet implemented.
 
 ### API
 
-```bash
-make api         # Launches FastAPI on http://localhost:8000
-```
+Not yet implemented.
 
 ### Docker
 
-```bash
-make docker-build
-make docker-run
-```
+Not yet implemented.
 
 ---
 
@@ -461,7 +461,8 @@ make docker-run
 
 **Optimal threshold:** *TBD* (default 0.5 baseline cost: *TBD*)
 
-**Top root-cause candidates:** *TBD — populated after SHAP analysis*
+**Top root-cause candidates:** `sensor_164`, `sensor_059`, `sensor_025`,
+`sensor_151`, `sensor_045` (from `reports/root_cause_candidates.csv`).
 
 ---
 
