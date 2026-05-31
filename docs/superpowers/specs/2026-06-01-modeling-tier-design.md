@@ -18,10 +18,12 @@ winner through a stable artifact path that downstream scripts consume.
 
 In scope:
 
-- A model registry covering logistic regression, random forest, XGBoost, and
-  LightGBM.
-- `RandomizedSearchCV` hyperparameter search per family, driven by the existing
-  `configs/model_config.yaml`.
+- A model registry covering four distinct approaches: a stratified dummy
+  classifier (chance floor), logistic regression (linear baseline), random
+  forest (bagged trees), and XGBoost (gradient-boosted trees).
+- `RandomizedSearchCV` hyperparameter search per tunable family (LR, RF,
+  XGBoost), driven by the existing `configs/model_config.yaml`. The dummy
+  classifier is fit directly with no search.
 - Winner selection by mean cross-validated PR-AUC on the training set.
 - Single-touch test-set evaluation of the winner, with the cost-sensitive
   threshold applied.
@@ -36,6 +38,13 @@ Out of scope (deferred):
   instead. Resampling can be added later as an extra axis if it proves
   worthwhile.
 - Stacking / ensembling across families.
+- LightGBM. Its grid stays in `configs/model_config.yaml` as a documented
+  option, but it is not wired into the registry: it is the same model class as
+  XGBoost (gradient-boosted trees) and would score within noise of it on a
+  dataset this small, so it adds a near-duplicate comparison row and a redundant
+  tuning sweep without adding a distinct modeling approach.
+- HPC / SLURM execution. A full run is minutes-scale on a workstation, so no
+  cluster scaffolding is warranted.
 - Changes to preprocessing, feature engineering, or the train/test split.
 
 ## Selection discipline
@@ -58,22 +67,26 @@ Model selection must not consult the test set.
 The existing `build_baseline_pipeline`, `train_model`, and
 `cross_validate_model` remain. Add:
 
-- **A model registry.** A mapping from family name to a factory that builds an
+- **A model registry.** A mapping from family name (`dummy`,
+  `logistic_regression`, `random_forest`, `xgboost`) to a factory that builds an
   unfitted estimator plus a flag indicating whether the family requires feature
-  scaling. Logistic regression requires a `StandardScaler`; the tree families do
-  not. Each registry entry produces an sklearn `Pipeline` of the form
-  `StandardScaler -> estimator` (scaling families) or `estimator` (tree
-  families), so the explainability code's existing
-  `_transform_pre_steps` logic continues to work unchanged.
+  scaling. Logistic regression requires a `StandardScaler`; the dummy and tree
+  families do not. Each registry entry produces an sklearn `Pipeline` of the form
+  `StandardScaler -> estimator` (scaling families) or `estimator` (the rest), so
+  the explainability code's existing `_transform_pre_steps` logic continues to
+  work unchanged.
 
-- **A search runner**, e.g. `run_search(name, X, y, model_cfg, run_cfg)`. It
-  reads the family's grid and the `search` block from the model config, builds a
-  `RandomizedSearchCV` (`scoring="average_precision"`, `StratifiedKFold` with
-  `run_cfg.cv_folds`, `n_iter`, `n_jobs`, `refit=True`, seeded by
-  `run_cfg.random_seed`), fits it on `X`/`y`, and returns the refit best
-  estimator together with the mean and standard deviation of the cross-validated
-  PR-AUC. For XGBoost, `scale_pos_weight` is computed from the training class
-  ratio at fit time (the config comment already specifies this).
+- **A search runner**, e.g. `run_search(name, X, y, model_cfg, run_cfg)`. For a
+  tunable family it reads the family's grid and the `search` block from the model
+  config, builds a `RandomizedSearchCV` (`scoring="average_precision"`,
+  `StratifiedKFold` with `run_cfg.cv_folds`, `n_iter`, `n_jobs`, `refit=True`,
+  seeded by `run_cfg.random_seed`), fits it on `X`/`y`, and returns the refit
+  best estimator together with the mean and standard deviation of the
+  cross-validated PR-AUC. For XGBoost, `scale_pos_weight` is computed from the
+  training class ratio at fit time (the config comment already specifies this).
+  The dummy classifier has no grid: it is fit directly and its mean CV PR-AUC is
+  obtained from a plain `cross_val_score` so it still appears in the comparison
+  as the chance floor.
 
 - **A winner-selection function**, e.g.
   `select_best(results) -> str`, returning the family name with the highest mean
@@ -138,10 +151,13 @@ All are repointed to `models/selected_model.joblib`. This is the reason for the
 stable selected-model path: otherwise a winning tree model would be selected
 while the logistic regression is still the artifact being scored and explained.
 
-SHAP requires no change. `explainability.compute_shap_values` already dispatches
-on estimator type — `LinearExplainer` for estimators with `coef_` (logistic
-regression), `TreeExplainer` for estimators with `feature_importances_` (random
-forest, XGBoost, LightGBM). Every family in the registry is already supported.
+SHAP requires no change for the candidate winners. `compute_shap_values` already
+dispatches on estimator type — `LinearExplainer` for estimators with `coef_`
+(logistic regression), `TreeExplainer` for estimators with
+`feature_importances_` (random forest, XGBoost). The dummy classifier has
+neither attribute and would raise `NotImplementedError`, but this never occurs:
+the dummy is a chance floor and cannot win selection, and `generate_explanations`
+only ever runs on `selected_model.joblib`.
 
 ## Testing
 
@@ -162,9 +178,6 @@ several minutes.
 
 ## Risks
 
-- **Compute time.** Tuning four families over the full feature set is
-  minutes-scale. Acceptable for an offline script; mitigated by keeping
-  `n_iter`/`cv_folds` in config so they can be reduced for quick runs.
 - **Marginal gains.** SECOM is a hard, noisy, highly imbalanced dataset. Tree
   models may improve ROC-AUC/PR-AUC modestly rather than dramatically. The
   deliverable is a rigorous, reproducible comparison and a defensible selection,
