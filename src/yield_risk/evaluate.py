@@ -69,18 +69,19 @@ def compute_metrics(
     )
 
 
-def format_report(metrics: ClassificationMetrics) -> str:
+def format_report(metrics: ClassificationMetrics, model_name: str = "Model") -> str:
     """Format metrics as a human-readable multi-line text report.
 
     Args:
         metrics: Computed classification metrics.
+        model_name: Name shown in the report title.
 
     Returns:
         Formatted string with all metric values and confusion matrix.
     """
     cm = metrics.confusion_matrix
     return (
-        "=== Baseline Model Evaluation ===\n"
+        f"=== {model_name} Evaluation ===\n"
         f"ROC AUC:    {metrics.roc_auc:.3f}\n"
         f"PR AUC:     {metrics.pr_auc:.3f}\n"
         f"Precision:  {metrics.precision:.3f}\n"

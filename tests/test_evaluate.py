@@ -80,6 +80,18 @@ class TestFormatReport:
         )
         assert isinstance(format_report(metrics), str)
 
+    def test_includes_model_name_in_title(self) -> None:
+        metrics = ClassificationMetrics(
+            roc_auc=0.9,
+            pr_auc=0.8,
+            precision=0.7,
+            recall=0.6,
+            f1=0.65,
+            confusion_matrix=[[10, 1], [2, 5]],
+        )
+        report = format_report(metrics, "XGBoost")
+        assert "XGBoost" in report
+
 
 class TestPlotFunctions:
     def test_plot_confusion_matrix_creates_file(self, tmp_path: Path) -> None:
