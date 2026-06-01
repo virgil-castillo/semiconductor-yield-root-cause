@@ -382,7 +382,11 @@ def _validate_selected_model_metrics(metrics: object) -> Mapping[str, object]:
         raise ValueError("selected_model_metrics must be a mapping.")
     has_explicit_counts = CONFUSION_COUNT_KEYS.issubset(metrics.keys())
     confusion_matrix = metrics.get("confusion_matrix")
-    if has_explicit_counts or _is_confusion_matrix(confusion_matrix):
+    if has_explicit_counts:
+        for key in CONFUSION_COUNT_KEYS:
+            _coerce_selected_metric_count(metrics[key])
+        return metrics
+    if _is_confusion_matrix(confusion_matrix):
         return metrics
     raise ValueError(
         "selected_model_metrics must include explicit confusion counts or a "
@@ -494,6 +498,15 @@ def _coerce_int(value: object) -> int:
     if isinstance(value, Real):
         return int(float(value))
     return int(str(value))
+
+
+def _coerce_selected_metric_count(value: object) -> int:
+    try:
+        return _coerce_int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "selected_model_metrics confusion counts must be coercible to ints."
+        ) from exc
 
 
 def _is_confusion_matrix(value: object) -> bool:

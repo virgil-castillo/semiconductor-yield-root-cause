@@ -307,6 +307,23 @@ def test_render_model_card_rejects_missing_confusion_counts(
         render_model_card(report_inputs)
 
 
+def test_render_model_card_rejects_null_explicit_confusion_count(
+    report_inputs: ReportInputs,
+) -> None:
+    """Explicit selected metrics counts must not be null."""
+    report_inputs.selected_model_metrics = {
+        "model": "random_forest",
+        "threshold": 0.27,
+        "true_positive": None,
+        "false_positive": 7,
+        "true_negative": 92,
+        "false_negative": 5,
+    }
+
+    with pytest.raises(ValueError, match="selected_model_metrics"):
+        render_model_card(report_inputs)
+
+
 def test_multiple_selected_model_rows_raise_value_error(
     report_inputs: ReportInputs,
 ) -> None:
