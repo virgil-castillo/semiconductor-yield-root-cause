@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from scripts.generate_reports import _split_reference_current
 from yield_risk.monitoring import (
     FeatureDriftResult,
     FeatureDriftSummary,
@@ -265,6 +266,36 @@ def test_write_report_bundle_writes_all_expected_markdown_files(
     assert (tmp_path / "model_card.md").read_text(encoding="utf-8")
     assert (tmp_path / "data_card.md").read_text(encoding="utf-8")
     assert (tmp_path / "root_cause_report.md").read_text(encoding="utf-8")
+
+
+def test_render_report_bundle_returns_all_four_sections(
+    report_inputs: ReportInputs,
+) -> None:
+    """Report bundle renderer returns every markdown section."""
+    bundle = render_report_bundle(report_inputs)
+
+    assert bundle.executive_summary.startswith("# Executive Summary")
+    assert bundle.model_card.startswith("# Model Card")
+    assert bundle.data_card.startswith("# Data Card")
+    assert bundle.root_cause_report.startswith("# Root-Cause Candidate Report")
+
+
+def test_split_reference_current_uses_deterministic_halves() -> None:
+    """Static report batches split into first-half reference and second-half current."""
+    data = pd.DataFrame({"sensor_001": [10, 20, 30, 40, 50], "label": [0, 1, 0, 1, 0]})
+
+    reference, current = _split_reference_current(data)
+
+    assert reference["sensor_001"].tolist() == [10, 20]
+    assert current["sensor_001"].tolist() == [30, 40, 50]
+
+
+def test_split_reference_current_rejects_too_few_rows() -> None:
+    """Static report batches need at least one row per side."""
+    data = pd.DataFrame({"sensor_001": [10], "label": [0]})
+
+    with pytest.raises(ValueError, match="at least 2 rows"):
+        _split_reference_current(data)
 
 
 def test_missing_model_comparison_columns_raise_value_error(
