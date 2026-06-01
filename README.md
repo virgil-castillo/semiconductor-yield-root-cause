@@ -93,8 +93,8 @@ for acquisition instructions.
 The tree below is the target production-style structure. In the current repo,
 the implemented pieces are the data pipeline, multi-family model selection,
 cost-sensitive evaluation, feature importance, SHAP/root-cause ranking, batch
-scoring, and notebooks through root-cause sensitivity analysis. API, dashboard,
-monitoring/reporting utilities, Makefile, Docker, and CI remain planned work.
+scoring, lightweight monitoring/reporting, and notebooks through monitoring
+drift checks. API, dashboard, Makefile, Docker, and CI remain planned work.
 
 ```
 semiconductor-yield-root-cause/
@@ -131,7 +131,7 @@ semiconductor-yield-root-cause/
 │   ├── 05_root_cause_analysis.ipynb
 │   ├── 05_2_xgboost_root_cause_sensitivity.ipynb
 │   ├── 06_cost_sensitive_thresholding.ipynb  # Planned
-│   └── 07_model_monitoring_drift_checks.ipynb # Planned
+│   └── 07_model_monitoring_drift_checks.ipynb
 │
 ├── src/yield_risk/                  # Core library — importable package
 │   ├── __init__.py
@@ -146,8 +146,8 @@ semiconductor-yield-root-cause/
 │   ├── thresholding.py              # Cost-sensitive threshold search
 │   ├── explainability.py            # SHAP global + local explanations
 │   ├── root_cause.py                # Candidate ranking, SPC checks, distributions
-│   ├── monitoring.py                # Planned
-│   └── reporting.py                 # Planned
+│   ├── monitoring.py                # Drift checks for static batches
+│   └── reporting.py                 # Markdown report generation
 │
 ├── scripts/
 │   ├── download_data.py             # Fetch SECOM files from UCI
@@ -156,7 +156,8 @@ semiconductor-yield-root-cause/
 │   ├── evaluate_model.py            # Load artifact, produce eval report
 │   ├── generate_explanations.py     # SHAP values + root-cause tables
 │   ├── feature_importance.py        # Feature importance export
-│   └── batch_score.py               # Score a new batch of wafer records
+│   ├── batch_score.py               # Score a new batch of wafer records
+│   └── generate_reports.py          # Generate markdown reports
 │
 ├── app/
 │   ├── streamlit_app.py             # Planned
@@ -418,6 +419,7 @@ python scripts/train_models.py
 python scripts/evaluate_model.py
 python scripts/feature_importance.py
 python scripts/generate_explanations.py
+python scripts/generate_reports.py
 ```
 
 ### Individual scripts
@@ -428,6 +430,8 @@ python scripts/preprocess_data.py     # Build processed train/test splits
 python scripts/train_models.py        # Train/tune model families, select winner
 python scripts/evaluate_model.py      # Evaluate on test set, save metrics + figures
 python scripts/feature_importance.py  # Extract selected-model feature importance
+python scripts/generate_explanations.py  # Generate SHAP/root-cause artifacts
+python scripts/generate_reports.py    # Generate markdown reports
 ```
 
 ### Tests
