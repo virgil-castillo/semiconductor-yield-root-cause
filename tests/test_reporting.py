@@ -1,6 +1,7 @@
 """Tests for markdown reporting utilities."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -18,11 +19,13 @@ from yield_risk.monitoring import (
 from yield_risk.reporting import (
     DataSummary,
     ReportInputs,
+    load_report_inputs,
     render_data_card,
     render_executive_summary,
     render_model_card,
     render_report_bundle,
     render_root_cause_report,
+    summarize_processed_data,
     write_report_bundle,
 )
 
@@ -272,3 +275,54 @@ def test_missing_model_comparison_columns_raise_value_error(
 
     with pytest.raises(ValueError, match="model_comparison"):
         render_executive_summary(report_inputs)
+
+
+def test_load_report_inputs_rejects_non_mapping_selected_metrics(
+    tmp_path: Path,
+    model_comparison: pd.DataFrame,
+    root_cause_candidates: pd.DataFrame,
+    monitoring_summary: MonitoringSummary,
+) -> None:
+    """Selected metrics JSON must decode to a mapping."""
+    model_comparison.to_csv(tmp_path / "model_comparison.csv", index=False)
+    root_cause_candidates.to_csv(tmp_path / "root_cause_candidates.csv", index=False)
+    (tmp_path / "selected_model_metrics.json").write_text(
+        json.dumps(["not", "a", "mapping"]),
+        encoding="utf-8",
+    )
+    train = pd.DataFrame({"sensor_001": [1.0, 2.0], "label": [0, 1]})
+    test = pd.DataFrame({"sensor_001": [3.0], "label": [0]})
+
+    with pytest.raises(ValueError, match="selected_model_metrics"):
+        load_report_inputs(tmp_path, train, test, monitoring_summary)
+
+
+def test_render_model_card_rejects_missing_confusion_counts(
+    report_inputs: ReportInputs,
+) -> None:
+    """Selected metrics must contain explicit counts or a 2x2 matrix."""
+    report_inputs.selected_model_metrics = {"model": "random_forest", "threshold": 0.27}
+
+    with pytest.raises(ValueError, match="selected_model_metrics"):
+        render_model_card(report_inputs)
+
+
+def test_multiple_selected_model_rows_raise_value_error(
+    report_inputs: ReportInputs,
+) -> None:
+    """Model comparison must contain exactly one selected row."""
+    report_inputs.model_comparison.loc[:, "selected"] = True
+
+    with pytest.raises(ValueError, match="model_comparison"):
+        render_executive_summary(report_inputs)
+
+
+def test_summarize_processed_data_rejects_test_only_sensor_columns() -> None:
+    """Processed data validation rejects sensor schema skew in either direction."""
+    train = pd.DataFrame({"sensor_001": [1.0, 2.0], "label": [0, 1]})
+    test = pd.DataFrame(
+        {"sensor_001": [3.0], "sensor_999": [4.0], "label": [0]}
+    )
+
+    with pytest.raises(ValueError, match="sensor columns"):
+        summarize_processed_data(train, test)

@@ -36,6 +36,12 @@ REPORT_FILENAMES = {
     "data_card": "data_card.md",
     "root_cause_report": "root_cause_report.md",
 }
+CONFUSION_COUNT_KEYS = {
+    "true_positive",
+    "false_positive",
+    "true_negative",
+    "false_negative",
+}
 
 
 @dataclass
@@ -141,14 +147,16 @@ def load_report_inputs(
         ReportInputs populated from artifact files and processed data.
 
     Raises:
-        ValueError: If loaded artifacts or data splits lack required columns.
+        ValueError: If loaded artifacts, selected metrics, or data splits are
+            invalid.
         FileNotFoundError: If a required artifact file is absent.
         json.JSONDecodeError: If selected metrics JSON is invalid.
     """
     model_comparison = pd.read_csv(reports_dir / "model_comparison.csv")
-    selected_metrics = json.loads(
+    selected_metrics_json = json.loads(
         (reports_dir / "selected_model_metrics.json").read_text(encoding="utf-8")
     )
+    selected_metrics = _validate_selected_model_metrics(selected_metrics_json)
     root_cause_candidates = pd.read_csv(reports_dir / "root_cause_candidates.csv")
     sensitivity_path = reports_dir / "root_cause_model_sensitivity_summary.csv"
     sensitivity_summary = (
@@ -366,6 +374,20 @@ def _validate_report_inputs(inputs: ReportInputs) -> None:
         set(ROOT_CAUSE_COLUMNS),
         "root_cause_candidates",
     )
+    _validate_selected_model_metrics(inputs.selected_model_metrics)
+
+
+def _validate_selected_model_metrics(metrics: object) -> Mapping[str, object]:
+    if not isinstance(metrics, Mapping):
+        raise ValueError("selected_model_metrics must be a mapping.")
+    has_explicit_counts = CONFUSION_COUNT_KEYS.issubset(metrics.keys())
+    confusion_matrix = metrics.get("confusion_matrix")
+    if has_explicit_counts or _is_confusion_matrix(confusion_matrix):
+        return metrics
+    raise ValueError(
+        "selected_model_metrics must include explicit confusion counts or a "
+        "valid 2x2 confusion_matrix."
+    )
 
 
 def _validate_columns(
@@ -391,8 +413,12 @@ def _validate_processed_data(train: pd.DataFrame, test: pd.DataFrame) -> None:
     if not train_sensors:
         raise ValueError("processed data must include sensor_ columns.")
     missing_test = sorted(set(train_sensors).difference(test_sensors))
-    if missing_test:
-        raise ValueError(f"test data missing sensor columns: {missing_test}")
+    missing_train = sorted(set(test_sensors).difference(train_sensors))
+    if missing_test or missing_train:
+        raise ValueError(
+            "processed data sensor columns must match across splits: "
+            f"missing in test={missing_test}, missing in train={missing_train}"
+        )
 
 
 def _sensor_columns(frame: pd.DataFrame) -> list[str]:
@@ -408,8 +434,8 @@ def _selected_model_row(inputs: ReportInputs) -> pd.Series:
     selected_rows = inputs.model_comparison[
         inputs.model_comparison["selected"].astype(bool)
     ]
-    if selected_rows.empty:
-        raise ValueError("model_comparison must contain one selected row.")
+    if len(selected_rows) != 1:
+        raise ValueError("model_comparison must contain exactly one selected row.")
     return selected_rows.iloc[0]
 
 
@@ -428,6 +454,7 @@ def _selected_threshold(inputs: ReportInputs, selected: pd.Series) -> float:
 
 
 def _metric_int(metrics: Mapping[str, object], key: str) -> int:
+    _validate_selected_model_metrics(metrics)
     value = metrics.get(key)
     if value is not None:
         return _coerce_int(value)
