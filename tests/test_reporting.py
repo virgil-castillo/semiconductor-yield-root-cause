@@ -224,11 +224,16 @@ def test_render_model_card_includes_threshold_and_confusion_matrix(
     """Model card includes selected operating threshold and confusion matrix."""
     model_card = render_model_card(report_inputs)
 
+    assert "## Intended Use" in model_card
+    assert "## Selection Protocol" in model_card
+    assert "training-only 5-fold cross-validation PR-AUC" in model_card
     assert "Selected threshold: 0.270" in model_card
     assert "True positives: 18" in model_card
     assert "False positives: 7" in model_card
     assert "True negatives: 92" in model_card
     assert "False negatives: 5" in model_card
+    assert "## Monitoring Hooks" in model_card
+    assert "static-batch demonstration" in model_card
 
 
 def test_render_data_card_includes_static_secom_and_sensor_caveats(

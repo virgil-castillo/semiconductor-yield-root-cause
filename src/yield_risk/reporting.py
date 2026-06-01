@@ -227,20 +227,40 @@ def render_model_card(inputs: ReportInputs) -> str:
     false_positive = _metric_int(inputs.selected_model_metrics, "false_positive")
     true_negative = _metric_int(inputs.selected_model_metrics, "true_negative")
     false_negative = _metric_int(inputs.selected_model_metrics, "false_negative")
+    model_name = _display_model_name(str(selected["model"]))
 
     return (
         "# Model Card\n\n"
-        f"- Model: {_display_model_name(str(selected['model']))}\n"
+        "## Intended Use\n\n"
+        "This model scores wafer-level process records for early yield-risk "
+        "screening and candidate review prioritization. Scores support "
+        "engineering triage and threshold-based hold/release analysis; they "
+        "are not a substitute for process-engineering validation.\n\n"
+        "## Model Summary\n\n"
+        f"- Model family: {model_name}\n"
         f"- Selected threshold: {threshold:.3f}\n"
+        f"- Expected cost at selected threshold: "
+        f"{_format_float(selected['expected_cost'])}\n"
         f"- Test PR-AUC: {_format_float(selected['test_pr_auc'])}\n"
         f"- Test ROC-AUC: {_format_float(selected['test_roc_auc'])}\n"
         f"- Test recall: {_format_float(selected['test_recall'])}\n"
         f"- Test precision: {_format_float(selected['test_precision'])}\n\n"
+        "## Selection Protocol\n\n"
+        "The selected model is random forest by training-only 5-fold "
+        "cross-validation PR-AUC. Held-out test metrics are reported for "
+        "generalization evidence and threshold evaluation, not for reopening "
+        "model selection.\n\n"
         "## Confusion Matrix\n\n"
         f"- True positives: {true_positive}\n"
         f"- False positives: {false_positive}\n"
         f"- True negatives: {true_negative}\n"
-        f"- False negatives: {false_negative}\n"
+        f"- False negatives: {false_negative}\n\n"
+        "## Monitoring Hooks\n\n"
+        "- Missingness drift, feature distribution drift, prediction "
+        "distribution drift, and high-risk-rate drift are available through "
+        "the static-batch monitoring utilities.\n"
+        "- Monitoring output in these reports is a static-batch demonstration, "
+        "not live telemetry.\n"
     )
 
 
