@@ -91,10 +91,10 @@ for acquisition instructions.
 ## Repository structure
 
 The tree below is the target production-style structure. In the current repo,
-the implemented pieces are the data pipeline, baseline logistic-regression
-model, evaluation, feature importance, SHAP/root-cause ranking, batch scoring,
-and notebooks through root-cause analysis. API, dashboard, monitoring/reporting
-utilities, Makefile, Docker, and CI remain planned work.
+the implemented pieces are the data pipeline, multi-family model selection,
+cost-sensitive evaluation, feature importance, SHAP/root-cause ranking, batch
+scoring, and notebooks through root-cause sensitivity analysis. API, dashboard,
+monitoring/reporting utilities, Makefile, Docker, and CI remain planned work.
 
 ```
 semiconductor-yield-root-cause/
@@ -129,6 +129,7 @@ semiconductor-yield-root-cause/
 │   ├── 03_baseline_results.ipynb
 │   ├── 04_model_training_evaluation.ipynb
 │   ├── 05_root_cause_analysis.ipynb
+│   ├── 05_2_xgboost_root_cause_sensitivity.ipynb
 │   ├── 06_cost_sensitive_thresholding.ipynb  # Planned
 │   └── 07_model_monitoring_drift_checks.ipynb # Planned
 │
@@ -139,9 +140,9 @@ semiconductor-yield-root-cause/
 │   ├── validation.py                # Schema and data-quality checks
 │   ├── preprocess.py                # Imputation, filtering, split pipeline
 │   ├── features.py                  # Aggregate features and interactions
-│   ├── model.py                     # Baseline LR training and CV
+│   ├── model.py                     # Model registry, CV search, selection
 │   ├── evaluate.py                  # Metrics, confusion matrix, PR/ROC curves
-│   ├── importance.py                # LR coefficient importance
+│   ├── importance.py                # Family-agnostic feature importance
 │   ├── thresholding.py              # Cost-sensitive threshold search
 │   ├── explainability.py            # SHAP global + local explanations
 │   ├── root_cause.py                # Candidate ranking, SPC checks, distributions
@@ -151,10 +152,10 @@ semiconductor-yield-root-cause/
 ├── scripts/
 │   ├── download_data.py             # Fetch SECOM files from UCI
 │   ├── preprocess_data.py           # Raw → processed train/test pipeline
-│   ├── train_baseline.py            # Train baseline LR, save artifact
+│   ├── train_models.py              # Train/tune model families, select winner
 │   ├── evaluate_model.py            # Load artifact, produce eval report
 │   ├── generate_explanations.py     # SHAP values + root-cause tables
-│   ├── feature_importance.py        # LR coefficient importance export
+│   ├── feature_importance.py        # Feature importance export
 │   └── batch_score.py               # Score a new batch of wafer records
 │
 ├── app/
@@ -413,7 +414,7 @@ conda activate mlops
 ```bash
 python scripts/download_data.py
 python scripts/preprocess_data.py
-python scripts/train_baseline.py
+python scripts/train_models.py
 python scripts/evaluate_model.py
 python scripts/feature_importance.py
 python scripts/generate_explanations.py
@@ -424,9 +425,9 @@ python scripts/generate_explanations.py
 ```bash
 python scripts/download_data.py       # Fetch raw data
 python scripts/preprocess_data.py     # Build processed train/test splits
-python scripts/train_baseline.py      # Train baseline LR, save model
+python scripts/train_models.py        # Train/tune model families, select winner
 python scripts/evaluate_model.py      # Evaluate on test set, save metrics + figures
-python scripts/feature_importance.py  # Extract and save feature importance
+python scripts/feature_importance.py  # Extract selected-model feature importance
 ```
 
 ### Tests
@@ -452,17 +453,28 @@ Not yet implemented.
 
 ## Key results
 
-| Model | PR-AUC | ROC-AUC | Recall (fail) | Balanced Acc | Cost @ opt. threshold |
-|-------|--------|---------|---------------|--------------|----------------------|
-| Dummy (stratified) | — | — | — | — | — |
-| Logistic Regression | 0.160 | 0.656 | 0.238 | — | — |
-| Random Forest | — | — | — | — | — |
-| XGBoost | — | — | — | — | — |
+Model selection is based on training-only 5-fold CV PR-AUC. The held-out test
+set is used once for final comparison and cost-threshold evaluation.
 
-**Optimal threshold:** *TBD* (default 0.5 baseline cost: *TBD*)
+| Model | CV PR-AUC | Test PR-AUC | Test ROC-AUC | Recall (fail) | Precision | Opt. threshold | Cost |
+|-------|-----------|-------------|--------------|---------------|-----------|----------------|------|
+| Dummy (stratified) | 0.066 | 0.066 | 0.490 | 0.048 | 0.048 | 0.01 | 220 |
+| Logistic Regression | 0.182 | 0.210 | 0.669 | 0.571 | 0.130 | 0.47 | 170 |
+| Random Forest | **0.217** | 0.193 | 0.758 | 0.571 | 0.171 | 0.08 | 148 |
+| XGBoost | 0.208 | **0.261** | **0.802** | **0.667** | **0.222** | 0.03 | **119** |
 
-**Top root-cause candidates:** `sensor_164`, `sensor_059`, `sensor_025`,
-`sensor_151`, `sensor_045` (from `reports/root_cause_candidates.csv`).
+**Selected model:** random forest, chosen by the training-only CV protocol.
+XGBoost performs better on the held-out test set, but that result is reported
+as generalization evidence rather than used to reopen model selection.
+
+**Selected-model root-cause candidates:** `sensor_059`, `sensor_033`,
+`sensor_519`, `sensor_205`, `sensor_031` from
+`reports/root_cause_candidates.csv`.
+
+**XGBoost sensitivity check:** the near-tie XGBoost model also ranks
+`sensor_059` first. Its top-five candidates overlap the selected random forest
+by 4/5 sensors, and the top-ten overlap is 7/10
+(`reports/root_cause_model_sensitivity_summary.csv`).
 
 ---
 

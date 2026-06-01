@@ -8,8 +8,13 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 from yield_risk.model import (
+    MODEL_REGISTRY,
+    SearchResult,
     build_baseline_pipeline,
+    build_pipeline,
     cross_validate_model,
+    run_search,
+    select_best,
     train_model,
 )
 
@@ -90,3 +95,122 @@ class TestCrossValidateModel:
         results = cross_validate_model(pipeline, X, y, cv_folds=3, random_seed=42)
         assert len(results["test_roc_auc"]) == 3
         assert len(results["test_f1"]) == 3
+
+
+class TestModelRegistry:
+    def test_registry_has_four_families(self) -> None:
+        assert set(MODEL_REGISTRY) == {
+            "dummy",
+            "logistic_regression",
+            "random_forest",
+            "xgboost",
+        }
+
+    def test_logistic_regression_pipeline_has_scaler(self) -> None:
+        pipeline = build_pipeline("logistic_regression", random_seed=42)
+        assert "scaler" in pipeline.named_steps
+
+    def test_random_forest_pipeline_has_no_scaler(self) -> None:
+        pipeline = build_pipeline("random_forest", random_seed=42)
+        assert "scaler" not in pipeline.named_steps
+
+    def test_dummy_pipeline_has_no_scaler(self) -> None:
+        pipeline = build_pipeline("dummy", random_seed=42)
+        assert "scaler" not in pipeline.named_steps
+
+    def test_every_pipeline_has_classifier_step(self) -> None:
+        for name in MODEL_REGISTRY:
+            assert "classifier" in build_pipeline(name, random_seed=42).named_steps
+
+
+_TINY_MODEL_CFG: dict[str, object] = {
+    "models": {
+        "logistic_regression": {
+            "C": [0.1, 1.0],
+            "max_iter": 1000,
+            "class_weight": "balanced",
+        },
+        "random_forest": {"n_estimators": [10, 20], "max_depth": [3, 5]},
+        "xgboost": {"n_estimators": [10, 20], "max_depth": [2, 3]},
+    },
+    "search": {
+        "n_iter": 20,
+        "scoring": "average_precision",
+        "cv_folds": 3,
+        "n_jobs": 1,
+        "refit": True,
+    },
+}
+
+
+class TestRunSearch:
+    def test_returns_fitted_estimator(
+        self, synthetic_data: tuple[pd.DataFrame, pd.Series]
+    ) -> None:
+        X, y = synthetic_data
+        result = run_search(
+            "random_forest", X, y, _TINY_MODEL_CFG, cv_folds=3,
+            random_seed=42, n_jobs=1,
+        )
+        assert isinstance(result, SearchResult)
+        proba = result.estimator.predict_proba(X)
+        assert proba.shape == (100, 2)
+
+    def test_cv_score_is_a_probability(
+        self, synthetic_data: tuple[pd.DataFrame, pd.Series]
+    ) -> None:
+        X, y = synthetic_data
+        result = run_search(
+            "random_forest", X, y, _TINY_MODEL_CFG, cv_folds=3,
+            random_seed=42, n_jobs=1,
+        )
+        assert 0.0 <= result.cv_pr_auc_mean <= 1.0
+
+    def test_best_params_are_classifier_prefixed(
+        self, synthetic_data: tuple[pd.DataFrame, pd.Series]
+    ) -> None:
+        X, y = synthetic_data
+        result = run_search(
+            "random_forest", X, y, _TINY_MODEL_CFG, cv_folds=3,
+            random_seed=42, n_jobs=1,
+        )
+        assert all(k.startswith("classifier__") for k in result.best_params)
+
+    def test_small_grid_does_not_raise_when_n_iter_exceeds_combos(
+        self, synthetic_data: tuple[pd.DataFrame, pd.Series]
+    ) -> None:
+        # logistic_regression grid has only 2 combos but n_iter is 20.
+        X, y = synthetic_data
+        result = run_search(
+            "logistic_regression", X, y, _TINY_MODEL_CFG, cv_folds=3,
+            random_seed=42, n_jobs=1,
+        )
+        assert result.name == "logistic_regression"
+
+    def test_dummy_has_empty_best_params(
+        self, synthetic_data: tuple[pd.DataFrame, pd.Series]
+    ) -> None:
+        X, y = synthetic_data
+        result = run_search(
+            "dummy", X, y, _TINY_MODEL_CFG, cv_folds=3,
+            random_seed=42, n_jobs=1,
+        )
+        assert result.best_params == {}
+        assert hasattr(result.estimator.named_steps["classifier"], "predict_proba")
+
+
+class TestSelectBest:
+    def test_returns_family_with_highest_mean(self) -> None:
+        results = [
+            SearchResult("a", build_pipeline("dummy", 42), 0.20, 0.0, {}),
+            SearchResult("b", build_pipeline("dummy", 42), 0.55, 0.0, {}),
+            SearchResult("c", build_pipeline("dummy", 42), 0.40, 0.0, {}),
+        ]
+        assert select_best(results) == "b"
+
+    def test_ties_break_toward_first(self) -> None:
+        results = [
+            SearchResult("first", build_pipeline("dummy", 42), 0.50, 0.0, {}),
+            SearchResult("second", build_pipeline("dummy", 42), 0.50, 0.0, {}),
+        ]
+        assert select_best(results) == "first"

@@ -1,0 +1,41 @@
+[
+  {
+    "model": "dummy",
+    "cv_pr_auc_mean": 0.06600326720798466,
+    "cv_pr_auc_std": 0.0019094270622714595,
+    "best_params": {},
+    "selected": false
+  },
+  {
+    "model": "logistic_regression",
+    "cv_pr_auc_mean": 0.1819643197311247,
+    "cv_pr_auc_std": 0.09281764282922485,
+    "best_params": {
+      "classifier__C": 0.001
+    },
+    "selected": false
+  },
+  {
+    "model": "random_forest",
+    "cv_pr_auc_mean": 0.21651070471983255,
+    "cv_pr_auc_std": 0.07122680257089363,
+    "best_params": {
+      "classifier__n_estimators": 300,
+      "classifier__min_samples_leaf": 1,
+      "classifier__max_depth": 20
+    },
+    "selected": true
+  },
+  {
+    "model": "xgboost",
+    "cv_pr_auc_mean": 0.20818622545384016,
+    "cv_pr_auc_std": 0.09020444784032584,
+    "best_params": {
+      "classifier__subsample": 0.8,
+      "classifier__n_estimators": 100,
+      "classifier__max_depth": 7,
+      "classifier__learning_rate": 0.1
+    },
+    "selected": false
+  }
+]
