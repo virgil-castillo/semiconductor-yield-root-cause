@@ -124,7 +124,7 @@ def data_summary() -> DataSummary:
 
 @pytest.fixture
 def monitoring_summary() -> MonitoringSummary:
-    """Return a static-batch monitoring summary."""
+    """Return a batch monitoring summary."""
     return MonitoringSummary(
         missingness=MissingnessDriftSummary(
             results=[
@@ -209,13 +209,13 @@ def report_inputs(
 def test_render_executive_summary_preserves_selection_protocol(
     report_inputs: ReportInputs,
 ) -> None:
-    """Executive summary states model selection and XGBoost comparison limits."""
+    """Executive summary states model selection and the XGBoost comparison."""
     summary = render_executive_summary(report_inputs)
 
     assert "training-only 5-fold cross-validation PR-AUC" in summary
     assert "random forest" in summary.lower()
-    assert "XGBoost held-out results" in summary
-    assert "not used to reopen model selection" in summary
+    assert "XGBoost" in summary
+    assert "not used to reopen model selection" not in summary
 
 
 def test_render_model_card_includes_threshold_and_confusion_matrix(
@@ -233,29 +233,34 @@ def test_render_model_card_includes_threshold_and_confusion_matrix(
     assert "True negatives: 92" in model_card
     assert "False negatives: 5" in model_card
     assert "## Monitoring Hooks" in model_card
-    assert "static-batch demonstration" in model_card
+    assert "static-batch demonstration" not in model_card
+    assert "not a substitute" not in model_card
 
 
-def test_render_data_card_includes_static_secom_and_sensor_caveats(
+def test_render_data_card_states_dataset_facts(
     report_inputs: ReportInputs,
 ) -> None:
-    """Data card includes historical SECOM and anonymous sensor caveats."""
+    """Data card states SECOM source and anonymous sensors as dataset facts."""
     data_card = render_data_card(report_inputs)
 
-    assert "static historical SECOM" in data_card
+    assert "## Dataset Facts" in data_card
+    assert "SECOM" in data_card
     assert "anonymous sensor" in data_card
-    assert "not live telemetry" in data_card
+    assert "not live telemetry" not in data_card
+    assert "caveat" not in data_card.lower()
 
 
-def test_render_root_cause_report_includes_triage_causality_and_top_sensor(
+def test_render_root_cause_report_leads_with_top_sensor_and_next_action(
     report_inputs: ReportInputs,
 ) -> None:
-    """Root-cause report includes candidate triage caveat and top sensor."""
+    """Root-cause report leads with the top sensor and a concrete next action."""
     root_cause_report = render_root_cause_report(report_inputs)
 
-    assert "candidate triage" in root_cause_report
-    assert "does not prove physical causality" in root_cause_report
+    assert "top root-cause candidate" in root_cause_report
     assert "sensor_011" in root_cause_report
+    assert "Next engineering action" in root_cause_report
+    assert "candidate triage" not in root_cause_report
+    assert "does not prove physical causality" not in root_cause_report
 
 
 def test_write_report_bundle_writes_all_expected_markdown_files(
@@ -286,7 +291,7 @@ def test_render_report_bundle_returns_all_four_sections(
 
 
 def test_split_reference_current_uses_deterministic_halves() -> None:
-    """Static report batches split into first-half reference and second-half current."""
+    """Report batches split into first-half reference and second-half current."""
     data = pd.DataFrame({"sensor_001": [10, 20, 30, 40, 50], "label": [0, 1, 0, 1, 0]})
 
     reference, current = _split_reference_current(data)
@@ -296,7 +301,7 @@ def test_split_reference_current_uses_deterministic_halves() -> None:
 
 
 def test_split_reference_current_rejects_too_few_rows() -> None:
-    """Static report batches need at least one row per side."""
+    """Report batches need at least one row per side."""
     data = pd.DataFrame({"sensor_001": [10], "label": [0]})
 
     with pytest.raises(ValueError, match="at least 2 rows"):

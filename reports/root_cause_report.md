@@ -1,9 +1,10 @@
 # Root-Cause Candidate Report
 
-- This report is candidate triage for investigation prioritization; it does not prove physical causality.
-- Sensor names are anonymous and require external engineering context before action.
+`sensor_059` is the top root-cause candidate (composite score 0.871).
 
-Top candidate sensor: sensor_059 (composite score 0.871).
+Why it leads: mean absolute SHAP 0.006, fail/pass lift 0.011, SPC flag rate 0.019, and composite score 0.871.
+
+Next engineering action: map the top sensor IDs to process step, tool, chamber, recipe, lot, and maintenance context before changing process settings. The SECOM sensor IDs are anonymized, so this metadata join connects the ranking to fab action.
 
 ## Top Candidates
 
@@ -22,7 +23,7 @@ Top candidate sensor: sensor_059 (composite score 0.871).
 
 ## Sensitivity
 
-Root-cause sensitivity summary is included as comparison context.
+XGBoost sensitivity overlap keeps `sensor_059` in the top-k overlap sets shown below.
 
 | top_n | overlap_count | jaccard | overlap_sensors |
 | --- | --- | --- | --- |

@@ -75,7 +75,7 @@ class ReportInputs:
         root_cause_candidates: Ranked root-cause candidate table.
         sensitivity_summary: Optional root-cause model sensitivity table.
         data_summary: Processed data split and sensor summary.
-        monitoring_summary: Static-batch monitoring summary.
+        monitoring_summary: Batch monitoring summary.
     """
 
     model_comparison: pd.DataFrame
@@ -141,7 +141,7 @@ def load_report_inputs(
         reports_dir: Directory containing reporting artifact files.
         train: Training split used to compute the data summary.
         test: Test split used to compute the data summary.
-        monitoring_summary: Static-batch monitoring summary to include.
+        monitoring_summary: Batch monitoring summary to include.
 
     Returns:
         ReportInputs populated from artifact files and processed data.
@@ -189,23 +189,41 @@ def render_executive_summary(inputs: ReportInputs) -> str:
     selected = _selected_model_row(inputs)
     xgboost = _comparison_row(inputs.model_comparison, "xgboost")
     selected_name = _display_model_name(str(selected["model"]))
+    threshold = _selected_threshold(inputs, selected)
+    top = _top_root_cause_candidate(inputs)
+    missing_alerts = _missingness_alert_count(inputs.monitoring_summary)
+    feature_alerts = _feature_alert_count(inputs.monitoring_summary)
+    top_text = (
+        "No root-cause candidate available yet."
+        if top is None
+        else (
+            f"`{top['sensor']}` "
+            f"(composite score {_format_float(top['composite_score'])})"
+        )
+    )
     xgboost_text = ""
     if xgboost is not None:
         xgboost_text = (
             "\n"
-            "- XGBoost held-out results are presented as comparison evidence "
-            "and are not used to reopen model selection."
+            f"- XGBoost held-out challenger PR-AUC: "
+            f"{_format_float(xgboost['test_pr_auc'])}; retained as a "
+            "sensitivity comparator for held-out behavior."
         )
 
     return (
         "# Executive Summary\n\n"
-        f"- Selected model: {selected_name}.\n"
-        "- Selection protocol: random forest was selected by "
-        "training-only 5-fold cross-validation PR-AUC.\n"
-        f"- Selected CV PR-AUC: {_format_float(selected['cv_pr_auc_mean'])}; "
-        f"held-out PR-AUC: {_format_float(selected['test_pr_auc'])}."
+        f"- Selected model: {selected_name}, chosen by training-only 5-fold "
+        f"cross-validation PR-AUC ({_format_float(selected['cv_pr_auc_mean'])}).\n"
+        f"- Held-out PR-AUC: {_format_float(selected['test_pr_auc'])}.\n"
+        f"- Operating threshold: {threshold:.3f}; expected cost: "
+        f"{_format_float(selected['expected_cost'])}.\n"
+        f"- Top sensor to inspect first: {top_text}."
         f"{xgboost_text}\n"
-        "- Monitoring output is a static-batch demonstration, not live telemetry."
+        f"- Monitoring flags: {missing_alerts} missingness alerts, "
+        f"{feature_alerts} feature drift alerts, prediction drift "
+        f"{_format_alert(inputs.monitoring_summary.predictions.alert)}, "
+        f"high-risk-rate drift "
+        f"{_format_alert(inputs.monitoring_summary.high_risk_rate.alert)}."
     )
 
 
@@ -233,9 +251,9 @@ def render_model_card(inputs: ReportInputs) -> str:
         "# Model Card\n\n"
         "## Intended Use\n\n"
         "This model scores wafer-level process records for early yield-risk "
-        "screening and candidate review prioritization. Scores support "
-        "engineering triage and threshold-based hold/release analysis; they "
-        "are not a substitute for process-engineering validation.\n\n"
+        "review and threshold-based hold/release simulation.\n\n"
+        "Designed output: risk score, threshold flag, and sensor ranking for "
+        "engineering review.\n\n"
         "## Model Summary\n\n"
         f"- Model family: {model_name}\n"
         f"- Selected threshold: {threshold:.3f}\n"
@@ -246,21 +264,20 @@ def render_model_card(inputs: ReportInputs) -> str:
         f"- Test recall: {_format_float(selected['test_recall'])}\n"
         f"- Test precision: {_format_float(selected['test_precision'])}\n\n"
         "## Selection Protocol\n\n"
-        "The selected model is random forest by training-only 5-fold "
-        "cross-validation PR-AUC. Held-out test metrics are reported for "
-        "generalization evidence and threshold evaluation, not for reopening "
-        "model selection.\n\n"
+        "Selection is fixed before held-out evaluation: random forest by "
+        "training-only 5-fold cross-validation PR-AUC. Held-out test metrics "
+        "measure generalization and threshold performance.\n\n"
         "## Confusion Matrix\n\n"
         f"- True positives: {true_positive}\n"
         f"- False positives: {false_positive}\n"
         f"- True negatives: {true_negative}\n"
         f"- False negatives: {false_negative}\n\n"
         "## Monitoring Hooks\n\n"
-        "- Missingness drift, feature distribution drift, prediction "
-        "distribution drift, and high-risk-rate drift are available through "
-        "the static-batch monitoring utilities.\n"
-        "- Monitoring output in these reports is a static-batch demonstration, "
-        "not live telemetry.\n"
+        "- Available checks: missingness drift, feature distribution drift, "
+        "prediction distribution drift, and high-risk-rate drift.\n"
+        "- The checks compare reference and current batches from the processed "
+        "dataset and surface alert counts and drift flags for engineering "
+        "review.\n"
     )
 
 
@@ -282,18 +299,18 @@ def render_data_card(inputs: ReportInputs) -> str:
     )
     return (
         "# Data Card\n\n"
-        "- Source caveat: reports describe static historical SECOM data, "
-        "not live telemetry.\n"
-        "- Sensor caveat: sensor names are anonymous sensor identifiers and "
-        "do not expose physical tool context.\n\n"
-        "## Processed Data\n\n"
-        f"- Training rows: {data.train_rows}\n"
-        f"- Test rows: {data.test_rows}\n"
-        f"- Sensor columns: {data.sensor_count}\n"
-        f"- Training fail rate: {data.train_fail_rate:.3f}\n"
-        f"- Test fail rate: {data.test_fail_rate:.3f}\n"
-        f"- Overall sensor missing-value rate: {data.sensor_missing_rate:.3f}\n\n"
-        "## Static-Batch Monitoring\n\n"
+        "## Dataset Facts\n\n"
+        "- Source: public historical SECOM benchmark with static wafer records "
+        "rather than a complete fab execution trace.\n"
+        "- Label: binary pass/fail; it does not identify the failure mode.\n"
+        "- Sensors: anonymous sensor identifiers; process step, tool, chamber, "
+        "recipe, lot, and maintenance metadata are not included.\n"
+        f"- Split: {data.train_rows} training rows "
+        f"(fail rate {data.train_fail_rate:.3f}) and {data.test_rows} test rows "
+        f"(fail rate {data.test_fail_rate:.3f}).\n"
+        f"- Sensor matrix: {data.sensor_count} sensor columns with overall "
+        f"missing-value rate {data.sensor_missing_rate:.3f} after preprocessing.\n\n"
+        "## Batch Monitoring Checks\n\n"
         f"- Missingness alerts: {missing_alerts}\n"
         f"- Feature drift alerts: {feature_alerts}\n"
         f"- Prediction drift alert: {inputs.monitoring_summary.predictions.alert}\n"
@@ -323,23 +340,36 @@ def render_root_cause_report(inputs: ReportInputs) -> str:
         ascending=False,
     )
     top = ranked.iloc[0] if not ranked.empty else None
-    top_text = (
+    lead_text = (
         "No root-cause candidates were available."
         if top is None
         else (
-            f"Top candidate sensor: {top['sensor']} "
+            f"`{top['sensor']}` is the top root-cause candidate "
             f"(composite score {_format_float(top['composite_score'])})."
         )
     )
-    sensitivity_text = _sensitivity_text(inputs.sensitivity_summary)
+    evidence_text = (
+        ""
+        if top is None
+        else (
+            "Why it leads: "
+            f"mean absolute SHAP {_format_float(top['mean_abs_shap'])}, "
+            f"fail/pass lift {_format_float(top['shap_lift'])}, "
+            f"SPC flag rate {_format_float(top['spc_flag_rate'])}, and "
+            f"composite score {_format_float(top['composite_score'])}."
+        )
+    )
+    top_sensor = None if top is None else str(top["sensor"])
+    sensitivity_text = _sensitivity_text(inputs.sensitivity_summary, top_sensor)
 
     return (
         "# Root-Cause Candidate Report\n\n"
-        "- This report is candidate triage for investigation prioritization; "
-        "it does not prove physical causality.\n"
-        "- Sensor names are anonymous and require external engineering context "
-        "before action.\n\n"
-        f"{top_text}\n\n"
+        f"{lead_text}\n\n"
+        f"{evidence_text}\n\n"
+        "Next engineering action: map the top sensor IDs to process step, tool, "
+        "chamber, recipe, lot, and maintenance context before changing process "
+        "settings. The SECOM sensor IDs are anonymized, so this metadata join "
+        "connects the ranking to fab action.\n\n"
         "## Top Candidates\n\n"
         f"{_markdown_table(ranked.head(10), ROOT_CAUSE_COLUMNS)}\n\n"
         f"{sensitivity_text}"
@@ -470,6 +500,29 @@ def _comparison_row(frame: pd.DataFrame, model: str) -> pd.Series | None:
     return matches.iloc[0]
 
 
+def _top_root_cause_candidate(inputs: ReportInputs) -> pd.Series | None:
+    _validate_columns(
+        inputs.root_cause_candidates,
+        set(ROOT_CAUSE_COLUMNS),
+        "root_cause_candidates",
+    )
+    if inputs.root_cause_candidates.empty:
+        return None
+    ranked = inputs.root_cause_candidates.sort_values(
+        "composite_score",
+        ascending=False,
+    )
+    return ranked.iloc[0]
+
+
+def _missingness_alert_count(summary: MonitoringSummary) -> int:
+    return sum(result.alert for result in summary.missingness.results)
+
+
+def _feature_alert_count(summary: MonitoringSummary) -> int:
+    return sum(result.alert for result in summary.features.results)
+
+
 def _selected_threshold(inputs: ReportInputs, selected: pd.Series) -> float:
     metric_threshold = inputs.selected_model_metrics.get("threshold")
     if metric_threshold is not None:
@@ -506,6 +559,10 @@ def _metric_from_confusion_matrix(
 
 def _format_float(value: object) -> str:
     return f"{_coerce_float(value):.3f}"
+
+
+def _format_alert(value: object) -> str:
+    return "triggered" if bool(value) else "clear"
 
 
 def _coerce_float(value: object) -> float:
@@ -566,11 +623,31 @@ def _format_table_value(value: object) -> str:
     return str(value)
 
 
-def _sensitivity_text(sensitivity_summary: pd.DataFrame) -> str:
+def _sensitivity_text(
+    sensitivity_summary: pd.DataFrame,
+    top_sensor: str | None = None,
+) -> str:
     if sensitivity_summary.empty:
         return "## Sensitivity\n\nNo sensitivity summary artifact was available."
+    if top_sensor is not None and "overlap_sensors" in sensitivity_summary.columns:
+        overlap_values = sensitivity_summary["overlap_sensors"].astype(str)
+        if overlap_values.str.contains(top_sensor, regex=False).any():
+            intro = (
+                f"XGBoost sensitivity overlap keeps `{top_sensor}` in the "
+                "top-k overlap sets shown below."
+            )
+        else:
+            intro = (
+                "XGBoost sensitivity overlap compares selected-model and "
+                "challenger sensor rankings."
+            )
+    else:
+        intro = (
+            "XGBoost sensitivity overlap compares selected-model and "
+            "challenger sensor rankings."
+        )
     return (
         "## Sensitivity\n\n"
-        "Root-cause sensitivity summary is included as comparison context.\n\n"
+        f"{intro}\n\n"
         f"{_markdown_table(sensitivity_summary, list(sensitivity_summary.columns))}"
     )

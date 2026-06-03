@@ -1,18 +1,14 @@
 # Data Card
 
-- Source caveat: reports describe static historical SECOM data, not live telemetry.
-- Sensor caveat: sensor names are anonymous sensor identifiers and do not expose physical tool context.
+## Dataset Facts
 
-## Processed Data
+- Source: public historical SECOM benchmark with static wafer records rather than a complete fab execution trace.
+- Label: binary pass/fail; it does not identify the failure mode.
+- Sensors: anonymous sensor identifiers; process step, tool, chamber, recipe, lot, and maintenance metadata are not included.
+- Split: 1253 training rows (fail rate 0.066) and 314 test rows (fail rate 0.067).
+- Sensor matrix: 198 sensor columns with overall missing-value rate 0.000 after preprocessing.
 
-- Training rows: 1253
-- Test rows: 314
-- Sensor columns: 198
-- Training fail rate: 0.066
-- Test fail rate: 0.067
-- Overall sensor missing-value rate: 0.000
-
-## Static-Batch Monitoring
+## Batch Monitoring Checks
 
 - Missingness alerts: 0
 - Feature drift alerts: 174
