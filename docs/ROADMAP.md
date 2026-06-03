@@ -85,9 +85,9 @@ Depends on: Tier 2 (monitoring), Tier 3 (reporting)
 
 | Phase | Deliverable | Key files | Status |
 |-------|-------------|-----------|--------|
-| 4-A | Lightweight model monitoring (feature drift, missingness drift, prediction dist) | `src/yield_risk/monitoring.py` | ⬜ |
-| 4-B | Report generation utilities | `src/yield_risk/reporting.py`, `scripts/generate_reports.py` | ⬜ |
-| 4-C | Written reports | `reports/executive_summary.md`, `reports/model_card.md`, `reports/data_card.md`, `reports/root_cause_report.md` | ⬜ |
+| 4-A | Lightweight model monitoring (feature drift, missingness drift, prediction dist) | `src/yield_risk/monitoring.py` | ✅ |
+| 4-B | Report generation utilities | `src/yield_risk/reporting.py`, `scripts/generate_reports.py` | ✅ |
+| 4-C | Written reports | `reports/executive_summary.md`, `reports/model_card.md`, `reports/data_card.md`, `reports/root_cause_report.md` | ✅ |
 
 ---
 
@@ -130,7 +130,7 @@ Depends on: Tier 1 (notebooks 01–03), Tier 2 (04), Tier 3 (05–06), Tier 4 (0
 | 7-D | Model training + evaluation | `notebooks/04_model_training_evaluation.ipynb` | ✅ |
 | 7-E | Root-cause analysis | `notebooks/05_root_cause_analysis.ipynb` | ✅ |
 | 7-F | Cost-sensitive thresholding | `notebooks/06_cost_sensitive_thresholding.ipynb` | ⬜ |
-| 7-G | Model monitoring + drift checks | `notebooks/07_model_monitoring_drift_checks.ipynb` | ⬜ |
+| 7-G | Model monitoring + drift checks | `notebooks/07_model_monitoring_drift_checks.ipynb` | ✅ |
 
 ---
 

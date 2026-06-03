@@ -1,8 +1,9 @@
-# Semiconductor Yield Excursion Early-Warning and Root-Cause Triage System
+# Semiconductor Yield-Risk Scoring and Root-Cause Candidate Ranking
 
-A production-style smart manufacturing ML system for semiconductor yield prediction,
-process excursion detection, root-cause candidate triage, and cost-sensitive wafer
-risk scoring — built on the UCI SECOM semiconductor manufacturing dataset.
+Yield-risk scoring and root-cause candidate ranking on
+the UCI SECOM semiconductor manufacturing benchmark. The system builds a
+training-safe pipeline for wafer pass/fail prediction, cost-sensitive threshold
+selection, sensor ranking, batch scoring, and monitoring/reporting checks.
 
 ---
 
@@ -14,7 +15,7 @@ risk scoring — built on the UCI SECOM semiconductor manufacturing dataset.
 4. [Repository structure](#repository-structure)
 5. [Methodology](#methodology)
 6. [Modeling approach](#modeling-approach)
-7. [Root-cause triage](#root-cause-triage)
+7. [Root-cause sensor ranking](#root-cause-sensor-ranking)
 8. [Cost-sensitive decision policy](#cost-sensitive-decision-policy)
 9. [Dashboard](#dashboard)
 10. [API](#api)
@@ -38,8 +39,8 @@ The goal of this system is to:
 1. **Predict** — score each wafer's failure risk from high-dimensional process
    measurements collected during manufacturing, before the wafer reaches the most
    expensive downstream steps.
-2. **Triage** — rank the process variables most associated with yield excursions so
-   process engineers have a prioritized list of candidates to investigate.
+2. **Rank** — identify the sensors most associated with yield excursions so
+   process engineers know which signals to inspect first.
 3. **Decide** — apply a cost-sensitive threshold policy that balances the cost of
    unnecessarily holding a passing wafer against the cost of releasing a failing one.
 
@@ -93,8 +94,8 @@ for acquisition instructions.
 The tree below is the target production-style structure. In the current repo,
 the implemented pieces are the data pipeline, multi-family model selection,
 cost-sensitive evaluation, feature importance, SHAP/root-cause ranking, batch
-scoring, and notebooks through root-cause sensitivity analysis. API, dashboard,
-monitoring/reporting utilities, Makefile, Docker, and CI remain planned work.
+scoring, lightweight monitoring/reporting, and notebooks through monitoring
+drift checks. API, dashboard, Makefile, Docker, and CI remain planned work.
 
 ```
 semiconductor-yield-root-cause/
@@ -131,7 +132,7 @@ semiconductor-yield-root-cause/
 │   ├── 05_root_cause_analysis.ipynb
 │   ├── 05_2_xgboost_root_cause_sensitivity.ipynb
 │   ├── 06_cost_sensitive_thresholding.ipynb  # Planned
-│   └── 07_model_monitoring_drift_checks.ipynb # Planned
+│   └── 07_model_monitoring_drift_checks.ipynb
 │
 ├── src/yield_risk/                  # Core library — importable package
 │   ├── __init__.py
@@ -146,8 +147,8 @@ semiconductor-yield-root-cause/
 │   ├── thresholding.py              # Cost-sensitive threshold search
 │   ├── explainability.py            # SHAP global + local explanations
 │   ├── root_cause.py                # Candidate ranking, SPC checks, distributions
-│   ├── monitoring.py                # Planned
-│   └── reporting.py                 # Planned
+│   ├── monitoring.py                # Drift checks across data batches
+│   └── reporting.py                 # Markdown report generation
 │
 ├── scripts/
 │   ├── download_data.py             # Fetch SECOM files from UCI
@@ -156,13 +157,14 @@ semiconductor-yield-root-cause/
 │   ├── evaluate_model.py            # Load artifact, produce eval report
 │   ├── generate_explanations.py     # SHAP values + root-cause tables
 │   ├── feature_importance.py        # Feature importance export
-│   └── batch_score.py               # Score a new batch of wafer records
+│   ├── batch_score.py               # Score a new batch of wafer records
+│   └── generate_reports.py          # Generate markdown reports
 │
 ├── app/
 │   ├── streamlit_app.py             # Planned
 │   └── pages/
 │       ├── 1_Batch_Scoring.py       # Upload → score → export
-│       ├── 2_Root_Cause_Triage.py   # SHAP plots, feature distributions
+│       ├── 2_Root_Cause_Ranking.py  # SHAP plots, feature distributions
 │       ├── 3_Cost_Thresholding.py   # Threshold slider, cost curve
 │       └── 4_Model_Monitoring.py    # Drift summary, prediction trend
 │
@@ -241,9 +243,9 @@ See [Modeling approach](#modeling-approach) below.
 
 See [Cost-sensitive decision policy](#cost-sensitive-decision-policy) below.
 
-### 7. Root-cause triage
+### 7. Root-cause sensor ranking
 
-See [Root-cause triage](#root-cause-triage) below.
+See [Root-cause sensor ranking](#root-cause-sensor-ranking) below.
 
 ---
 
@@ -276,11 +278,12 @@ it an unreliable signal.
 
 ---
 
-## Root-cause triage
+## Root-cause sensor ranking
 
-Root-cause triage is framed as **candidate investigation prioritization**, not
-causal attribution. The workflow identifies process variables statistically
-associated with failure risk and ranks them for engineering review.
+This step ranks the sensors most associated with failure risk so engineers know
+which signals to inspect first. The workflow combines model attribution,
+distribution comparisons, and SPC-style excursion checks to show which signals
+deserve the first process-engineering look.
 
 Steps:
 
@@ -298,12 +301,12 @@ Steps:
    versus passing wafers; highlights features with disproportionate excursion rates
    in the fail population.
 
-> **Important caveat:** This workflow identifies candidate variables associated with
-> failure risk. It does not prove physical causality. In a production environment,
-> these findings would need to be validated with tool metadata, chamber history,
-> recipe information, lot genealogy, maintenance logs, metrology data, and
-> process-engineer review. The anonymous feature names in SECOM prevent any direct
-> physical interpretation without additional fab context.
+**Dataset constraints:** SECOM uses anonymized sensor IDs and a binary pass/fail
+line-test label, so the ranking names sensors to inspect rather than failure
+modes or process steps. The public benchmark is a historical snapshot, not a
+complete fab execution trace. In a fab follow-up, the next engineering action is
+to map top IDs such as `sensor_059` to process step, tool, chamber, recipe, lot
+history, and maintenance records before changing process settings.
 
 ---
 
@@ -341,7 +344,7 @@ interface to the trained system.
 | Page | Function |
 |------|----------|
 | **Batch Scoring** | Upload a CSV of wafer process measurements, score failure risk, flag high-risk units, export results |
-| **Root-Cause Triage** | Global SHAP importance chart, local explanation for a selected wafer, pass/fail distribution comparisons |
+| **Root-Cause Ranking** | Global SHAP importance chart, local explanation for a selected wafer, pass/fail distribution comparisons |
 | **Cost Thresholding** | Interactive threshold slider with live confusion matrix, cost curve, and operating-point recommendation |
 | **Model Monitoring** | Missingness summary, feature drift indicators, prediction distribution, high-risk rate trend |
 
@@ -418,6 +421,7 @@ python scripts/train_models.py
 python scripts/evaluate_model.py
 python scripts/feature_importance.py
 python scripts/generate_explanations.py
+python scripts/generate_reports.py
 ```
 
 ### Individual scripts
@@ -428,6 +432,8 @@ python scripts/preprocess_data.py     # Build processed train/test splits
 python scripts/train_models.py        # Train/tune model families, select winner
 python scripts/evaluate_model.py      # Evaluate on test set, save metrics + figures
 python scripts/feature_importance.py  # Extract selected-model feature importance
+python scripts/generate_explanations.py  # Generate SHAP/root-cause artifacts
+python scripts/generate_reports.py    # Generate markdown reports
 ```
 
 ### Tests
@@ -464,12 +470,15 @@ set is used once for final comparison and cost-threshold evaluation.
 | XGBoost | 0.208 | **0.261** | **0.802** | **0.667** | **0.222** | 0.03 | **119** |
 
 **Selected model:** random forest, chosen by the training-only CV protocol.
-XGBoost performs better on the held-out test set, but that result is reported
-as generalization evidence rather than used to reopen model selection.
+XGBoost performs better on the held-out test set; random forest remains the
+selected model under the training-CV protocol.
 
 **Selected-model root-cause candidates:** `sensor_059`, `sensor_033`,
 `sensor_519`, `sensor_205`, `sensor_031` from
 `reports/root_cause_candidates.csv`.
+
+`sensor_059` is the first sensor to inspect. It leads the selected model's
+candidate ranking and remains first in the XGBoost sensitivity check.
 
 **XGBoost sensitivity check:** the near-tie XGBoost model also ranks
 `sensor_059` first. Its top-five candidates overlap the selected random forest
@@ -481,12 +490,12 @@ by 4/5 sensors, and the top-ten overlap is 7/10
 ## Limitations
 
 - **Anonymous features.** The SECOM dataset provides no physical process labels.
-  Root-cause candidates are identified by statistical association only; physical
-  interpretation requires fab-internal metadata.
+  The ranking names sensor IDs; linking those IDs to process step, tool,
+  chamber, recipe, lot, or maintenance context is the first fab follow-up.
 
-- **Static dataset.** The UCI SECOM release is a historical snapshot. The system
-  does not include real-time data ingestion; monitoring modules simulate drift
-  detection against held-out batches.
+- **Historical benchmark.** The UCI SECOM release is a public historical
+  dataset, not a complete fab execution trace. Monitoring modules compare
+  held-out batches; real-time ingestion remains future work.
 
 - **Single fab, single technology node.** Model performance is specific to the
   process conditions captured in this dataset. Transferring to a different fab
