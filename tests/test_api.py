@@ -383,7 +383,15 @@ def test_batch_happy_path_returns_200_and_all_fields(
 def test_batch_per_wafer_independence_and_order(
     client: TestClient,
 ) -> None:
-    """Batch predictions correspond positionally and empty features get imputed."""
+    """Batch predictions correspond positionally, are distinct, and vary monotonically.
+
+    Uses inputs whose sensor_000 values span a wide range so that a vectorized
+    implementation that collapses all rows to the same value is falsified by the
+    monotonicity check.  With the fixture model and random_state=42:
+      - W-a (sensor_000=10.0)  → lowest failure probability
+      - W-b (empty/imputed)    → middle failure probability
+      - W-c (sensor_000=-10.0) → highest failure probability
+    """
     payload = {
         "wafers": [
             {"wafer_id": "W-a", "features": {"sensor_000": 10.0}},
@@ -395,19 +403,32 @@ def test_batch_per_wafer_independence_and_order(
     assert response.status_code == 200
     predictions = response.json()["predictions"]
     assert len(predictions) == 3
-    # Wafer with empty features still gets a prediction (imputed)
-    assert predictions[1]["wafer_id"] == "W-b"
-    assert isinstance(predictions[1]["failure_probability"], float)
-    # Positional correctness
+    # Positional / wafer_id order correctness
     assert predictions[0]["wafer_id"] == "W-a"
+    assert predictions[1]["wafer_id"] == "W-b"
     assert predictions[2]["wafer_id"] == "W-c"
+    # Empty features wafer still gets a prediction (imputed to training mean)
+    assert isinstance(predictions[1]["failure_probability"], float)
+    # Per-wafer values are DISTINCT — falsifies any vectorized-collapse bug
+    probs = [p["failure_probability"] for p in predictions]
+    assert len(set(probs)) == 3, f"Expected 3 distinct probabilities, got {probs}"
+    # Monotonicity: high sensor_000 → low failure probability for this model
+    prob_a = predictions[0]["failure_probability"]
+    prob_b = predictions[1]["failure_probability"]
+    prob_c = predictions[2]["failure_probability"]
+    assert prob_a < prob_b, (
+        f"W-a prob {prob_a} should be < W-b prob {prob_b}"
+    )
+    assert prob_b < prob_c, (
+        f"W-b prob {prob_b} should be < W-c prob {prob_c}"
+    )
 
 
 def test_batch_empty_wafers_list_returns_400(
     client: TestClient,
 ) -> None:
     """POST /predict/batch with empty wafers list returns 400 with detail."""
-    payload = {"wafers": []}
+    payload: dict[str, list[object]] = {"wafers": []}
     response = client.post("/predict/batch", json=payload)
     assert response.status_code == 400
     assert "detail" in response.json()
@@ -452,6 +473,27 @@ def test_batch_unknown_key_in_one_wafer_returns_400_naming_key(
     response = client.post("/predict/batch", json=payload)
     assert response.status_code == 400
     detail = response.json()["detail"]
+    assert "sensor_999" in detail
+
+
+def test_batch_multi_wafer_bad_key_aggregation_returns_400_naming_all_keys(
+    client: TestClient,
+) -> None:
+    """POST /predict/batch with distinct bad keys across wafers returns 400 naming both.
+
+    Verifies that the set-union aggregation of invalid keys across the whole
+    batch reports every offending key, not just the first encountered.
+    """
+    payload = {
+        "wafers": [
+            {"wafer_id": "W-1", "features": {"sensor_000": 1.0, "foo": 9.9}},
+            {"wafer_id": "W-2", "features": {"sensor_001": 0.5, "sensor_999": 2.0}},
+        ]
+    }
+    response = client.post("/predict/batch", json=payload)
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "foo" in detail
     assert "sensor_999" in detail
 
 
