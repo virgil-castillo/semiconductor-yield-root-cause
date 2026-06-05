@@ -47,6 +47,7 @@ def export_model_metadata(
 
     Raises:
         FileNotFoundError: If any required input file does not exist.
+        ValueError: If no entry in cv_results_path has ``selected: true``.
     """
     # Load pipeline
     pipeline = joblib.load(model_path)
@@ -67,7 +68,11 @@ def export_model_metadata(
 
     # Model family from cv_results
     cv_results = json.loads(cv_results_path.read_text())
-    family = next(r["model"] for r in cv_results if r["selected"])
+    family: str | None = next(
+        (r["model"] for r in cv_results if r["selected"]), None
+    )
+    if family is None:
+        raise ValueError(f"No selected model found in {cv_results_path}")
 
     # Short hash: first 7 chars of sha256 of model file bytes
     short_hash = hashlib.sha256(model_path.read_bytes()).hexdigest()[:7]

@@ -20,6 +20,9 @@ from sklearn.dummy import DummyClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from yield_risk.config import load_cost_config
+from yield_risk.thresholding import find_optimal_threshold
+
 # ---------------------------------------------------------------------------
 # Shared constants
 # ---------------------------------------------------------------------------
@@ -198,9 +201,111 @@ def test_optimal_threshold_is_float(metadata: dict[str, Any]) -> None:
     assert isinstance(metadata["optimal_threshold"], float)
 
 
-def test_optimal_threshold_within_search_range(metadata: dict[str, Any]) -> None:
-    """optimal_threshold is within [0.1, 0.9] (the fixture search range)."""
-    assert 0.1 <= metadata["optimal_threshold"] <= 0.9
+def test_optimal_threshold_reflects_cost_asymmetry(
+    model_path: Path,
+    cv_results_path: Path,
+    metrics_path: Path,
+    tmp_path: Path,
+) -> None:
+    """optimal_threshold is driven below 0.5 by high false_pass cost.
+
+    Constructs a hermetic test CSV whose scores (from the fitted pipeline) are
+    irrelevant — what matters is that the cost config has false_pass=10x
+    false_fail.  We verify the exported threshold equals the independently
+    computed find_optimal_threshold result for the same inputs, and that it is
+    strictly less than 0.5, confirming cost-sensitive (not naive) selection.
+
+    The label distribution is all-fail (y=1 throughout), so every threshold
+    below 1.0 that catches all positives is equally good, but a *high* threshold
+    would miss many fails (costly false_passes).  The grid runs 0.05 to 0.95 in
+    fine steps; a correct implementation must land well below 0.5.
+    """
+    # Cost config: false_pass is 10x more expensive than false_fail
+    cost_config: dict[str, Any] = {
+        "cost_matrix": {
+            "true_pass": 0.0,
+            "true_fail": 0.0,
+            "false_fail": 1.0,
+            "false_pass": 10.0,
+        },
+        "threshold_search": {
+            "low": 0.05,
+            "high": 0.95,
+            "steps": 19,
+        },
+    }
+    cost_config_path = tmp_path / "cost_config_asym.yaml"
+    cost_config_path.write_text(yaml.dump(cost_config))
+
+    # Build a test CSV: all labels are 1 (fail).
+    # The pipeline is a DummyClassifier(strategy="stratified") fit on a
+    # balanced dataset, so it returns scores near 0.5.  At threshold > ~0.5
+    # it starts predicting 0 (pass) for some samples — generating false_passes
+    # that are very costly.  At threshold <= the pipeline's score the optimal
+    # cost is achieved.
+    rng = np.random.default_rng(42)
+    n = 50
+    df = pd.DataFrame(rng.random((n, len(SENSOR_COLS))), columns=SENSOR_COLS)
+    df["label"] = 1  # all failures — any missed prediction is a false_pass
+    asym_test_csv = tmp_path / "test_asym.csv"
+    df.to_csv(asym_test_csv, index=False)
+
+    output_path = tmp_path / "meta_asym" / "model_metadata.json"
+    result = export_model_metadata(
+        model_path=model_path,
+        test_path=asym_test_csv,
+        cv_results_path=cv_results_path,
+        metrics_path=metrics_path,
+        cost_config_path=cost_config_path,
+        output_path=output_path,
+    )
+
+    # Independently compute the expected threshold using the same pipeline
+    pipeline = joblib.load(model_path)
+    X = df[SENSOR_COLS]
+    y_true = df["label"].to_numpy()
+    y_prob = pipeline.predict_proba(X)[:, 1]
+    cost_cfg = load_cost_config(cost_config_path)
+    expected = find_optimal_threshold(
+        y_true, y_prob, cost_cfg.cost_matrix, cost_cfg.threshold_search
+    )
+
+    # The exported threshold must match the independently computed result
+    assert result["optimal_threshold"] == expected.threshold
+    # And must be strictly below 0.5 — proves cost-sensitivity, not naive 0.5
+    assert result["optimal_threshold"] < 0.5
+
+
+# ---------------------------------------------------------------------------
+# Tests — error handling
+# ---------------------------------------------------------------------------
+
+
+def test_no_selected_model_raises_value_error(
+    model_path: Path,
+    test_csv_path: Path,
+    metrics_path: Path,
+    cost_config_path: Path,
+    output_path: Path,
+    tmp_path: Path,
+) -> None:
+    """export_model_metadata raises ValueError when no entry has selected=True."""
+    no_selected = [
+        {"model": "logistic_regression", "cv_pr_auc_mean": 0.72, "selected": False},
+        {"model": "random_forest", "cv_pr_auc_mean": 0.85, "selected": False},
+    ]
+    bad_cv_path = tmp_path / "cv_no_selected.json"
+    bad_cv_path.write_text(json.dumps(no_selected))
+
+    with pytest.raises(ValueError, match="No selected model"):
+        export_model_metadata(
+            model_path=model_path,
+            test_path=test_csv_path,
+            cv_results_path=bad_cv_path,
+            metrics_path=metrics_path,
+            cost_config_path=cost_config_path,
+            output_path=output_path,
+        )
 
 
 # ---------------------------------------------------------------------------
