@@ -108,12 +108,13 @@ def load_model_bundle(
             raise ValueError(
                 f"Metadata {metadata_path} is missing required key: {exc}"
             ) from exc
-        # expected_sensors is optional in the metadata: use it if recorded,
-        # otherwise fall back to the fitted pipeline's input feature names.
+        # expected_sensors is optional in the metadata: use it if recorded
+        # (an explicit empty list is respected), otherwise fall back to the
+        # fitted pipeline's input feature names.
         recorded_sensors = meta.get("expected_sensors")
         expected_sensors: list[str] = (
             list(recorded_sensors)
-            if recorded_sensors
+            if recorded_sensors is not None
             else _sensor_names_from_pipeline(pipeline)
         )
     else:
