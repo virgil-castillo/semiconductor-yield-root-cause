@@ -97,10 +97,14 @@ Depends on: Tier 2
 
 | Phase | Deliverable | Key files | Status |
 |-------|-------------|-----------|--------|
-| 5-A | Pydantic schemas | `api/schemas.py` | ⬜ |
-| 5-B | FastAPI app (health, single-wafer predict, batch predict) | `api/main.py` | ⬜ |
+| 5-A | Pydantic schemas | `api/schemas.py` | ✅ |
+| 5-B | FastAPI app (health, single-wafer predict, batch predict) | `api/main.py` | ✅ |
 
-**Tests:** `tests/test_api.py`
+Shared scoring extracted to `src/yield_risk/scoring.py` (reused by the CLI and
+the API); model metadata (threshold + version) persisted via
+`scripts/export_model_metadata.py`.
+
+**Tests:** `tests/test_api.py`, `tests/test_scoring.py`, `tests/test_export_model_metadata.py`
 
 ---
 
