@@ -86,6 +86,8 @@ def load_model_bundle(
 
     Raises:
         FileNotFoundError: If *model_path* does not exist.
+        ValueError: If *metadata_path* exists but is missing a required key
+            (``optimal_threshold``, ``model_version``, or ``expected_sensors``).
     """
     pipeline: Pipeline = joblib.load(model_path)
 
@@ -95,9 +97,14 @@ def load_model_bundle(
     if metadata_path.exists():
         with metadata_path.open() as fh:
             meta: dict[str, Any] = json.load(fh)
-        threshold = float(meta["optimal_threshold"])
-        model_version = str(meta["model_version"])
-        expected_sensors: list[str] = list(meta["expected_sensors"])
+        try:
+            threshold = float(meta["optimal_threshold"])
+            model_version = str(meta["model_version"])
+            expected_sensors: list[str] = list(meta["expected_sensors"])
+        except KeyError as exc:
+            raise ValueError(
+                f"Metadata {metadata_path} is missing required key: {exc}"
+            ) from exc
     else:
         logger.warning(
             "Metadata file not found at %s; using defaults (threshold=0.5, "

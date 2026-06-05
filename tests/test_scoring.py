@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import joblib
 import numpy as np
@@ -110,6 +112,26 @@ def test_load_model_bundle_pipeline_is_loaded(
     assert isinstance(result.pipeline, Pipeline)
 
 
+def test_load_model_bundle_raises_value_error_on_missing_metadata_key(
+    tmp_path: Path,
+) -> None:
+    """ValueError is raised when metadata JSON exists but is missing a required key."""
+    pipeline = _make_pipeline()
+    model_path = tmp_path / "model.joblib"
+    joblib.dump(pipeline, model_path)
+    # Write metadata that is missing 'optimal_threshold'
+    incomplete_metadata = {
+        "model_version": "v1.2.3",
+        "expected_sensors": SENSOR_COLS,
+        # 'optimal_threshold' deliberately omitted
+    }
+    metadata_path = tmp_path / "model_metadata.json"
+    metadata_path.write_text(json.dumps(incomplete_metadata))
+
+    with pytest.raises(ValueError, match="optimal_threshold"):
+        load_model_bundle(model_path)
+
+
 # ---------------------------------------------------------------------------
 # load_model_bundle — fallback (no metadata file)
 # ---------------------------------------------------------------------------
@@ -141,8 +163,6 @@ def test_load_model_bundle_fallback_warns(
     tmp_model: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Without metadata a WARNING is logged."""
-    import logging
-
     with caplog.at_level(logging.WARNING, logger="yield_risk.scoring"):
         load_model_bundle(tmp_model)
     assert any("warning" in r.levelname.lower() for r in caplog.records)
@@ -177,12 +197,44 @@ def test_score_frame_preserves_original_columns(bundle: ModelBundle) -> None:
 
 
 def test_score_frame_missing_sensors_filled_with_nan(bundle: ModelBundle) -> None:
-    """Sensors missing from input are passed to the pipeline as NaN."""
+    """Sensors missing from input are passed to the pipeline as NaN, in order.
+
+    Verifies that:
+    - The X matrix passed to predict_proba has columns equal to
+      bundle.expected_sensors in that exact order.
+    - Missing sensor columns contain NaN.
+    - The provided sensor column's value is preserved.
+    """
     # Only provide sensor_001; sensor_002 and sensor_003 are absent
     df = pd.DataFrame({"sensor_001": [0.3]})
-    # This should not raise; the pipeline receives NaN for missing columns
-    out = score_frame(bundle, df)
+
+    captured: list[pd.DataFrame] = []
+
+    original_predict_proba = bundle.pipeline.predict_proba
+
+    def _capturing_predict_proba(X: pd.DataFrame) -> np.ndarray:
+        captured.append(X.copy())
+        return original_predict_proba(X)
+
+    with patch.object(
+        bundle.pipeline, "predict_proba", side_effect=_capturing_predict_proba
+    ):
+        out = score_frame(bundle, df)
+
     assert "score" in out.columns
+    assert len(captured) == 1
+    X_received = captured[0]
+
+    # Columns must exactly match expected_sensors in order
+    assert list(X_received.columns) == bundle.expected_sensors
+
+    # The provided sensor value is preserved
+    assert float(X_received["sensor_001"].iloc[0]) == pytest.approx(0.3)
+
+    # Missing sensors are NaN
+    for col in ["sensor_002", "sensor_003"]:
+        actual = X_received[col].iloc[0]
+        assert pd.isna(actual), f"{col} should be NaN but got {actual}"
 
 
 def test_score_frame_does_not_mutate_input(bundle: ModelBundle) -> None:
