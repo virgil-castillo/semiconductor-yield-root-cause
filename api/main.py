@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from api.schemas import (
     BatchPredictionResponse,
@@ -55,6 +56,29 @@ app = FastAPI(
     title="Semiconductor Yield Risk Prediction API",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(
+    request: Request, exc: Exception
+) -> JSONResponse:
+    """Return the spec's ErrorResponse JSON for any unhandled error.
+
+    Without this, Starlette's default server-error handler responds with a
+    ``text/plain`` body, which does not match the ``ErrorResponse``
+    (``{"detail": str}``) shape the API contract specifies for HTTP 500.
+
+    Args:
+        request: The incoming FastAPI request.
+        exc: The unhandled exception.
+
+    Returns:
+        A 500 JSONResponse with an ``ErrorResponse``-shaped body.
+    """
+    logger.exception("Unhandled error processing %s %s", request.method, request.url)
+    return JSONResponse(
+        status_code=500, content={"detail": "Internal Server Error"}
+    )
 
 
 def _get_bundle(request: Request) -> ModelBundle | None:
@@ -139,9 +163,9 @@ def predict(payload: WaferRequest, request: Request) -> PredictionResponse:
         HTTPException: 400 if any feature key falls outside the valid namespace.
 
     Note:
-        Any unexpected error during scoring propagates and is handled by
-        FastAPI's default exception handler as an HTTP 500 response with body
-        ``{"detail": "Internal Server Error"}``.
+        Any unexpected error during scoring is caught by the app's
+        unhandled-exception handler and returned as an HTTP 500 response with
+        an ErrorResponse body ``{"detail": "Internal Server Error"}``.
     """
     bundle = _get_bundle(request)
     if bundle is None:
@@ -196,9 +220,9 @@ def predict_batch(payload: BatchRequest, request: Request) -> BatchPredictionRes
             valid sensor_000..sensor_589 namespace.
 
     Note:
-        Any unexpected error during scoring propagates and is handled by
-        FastAPI's default exception handler as an HTTP 500 response with body
-        ``{"detail": "Internal Server Error"}``.
+        Any unexpected error during scoring is caught by the app's
+        unhandled-exception handler and returned as an HTTP 500 response with
+        an ErrorResponse body ``{"detail": "Internal Server Error"}``.
     """
     bundle = _get_bundle(request)
     if bundle is None:

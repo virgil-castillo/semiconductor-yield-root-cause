@@ -525,3 +525,33 @@ def test_batch_malformed_body_wafer_missing_features_returns_422(
     payload = {"wafers": [{"wafer_id": "W-1"}]}
     response = client.post("/predict/batch", json=payload)
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Unhandled-error (500) contract — must be ErrorResponse JSON, not plain text
+# ---------------------------------------------------------------------------
+
+
+def test_predict_unhandled_error_returns_500_error_response() -> None:
+    """An unexpected scoring error returns 500 with an ErrorResponse JSON body.
+
+    Per the spec error matrix, an unhandled error is ``500 | ErrorResponse``
+    (``{"detail": str}``), not Starlette's default text/plain body.
+    """
+    failing = _make_bundle()
+
+    def _boom(_: object) -> object:
+        raise RuntimeError("boom")
+
+    failing.pipeline.predict_proba = _boom  # type: ignore[method-assign]
+    app.state.bundle = failing
+    # raise_server_exceptions=False so the handler's response is returned.
+    tc = TestClient(app, raise_server_exceptions=False)
+    try:
+        response = tc.post("/predict", json={"features": {"sensor_000": 1.0}})
+    finally:
+        app.state.bundle = None
+
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("application/json")
+    assert "detail" in response.json()
