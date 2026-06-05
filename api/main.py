@@ -130,7 +130,11 @@ def predict(payload: WaferRequest, request: Request) -> PredictionResponse:
     Raises:
         HTTPException: 503 if the model bundle is not loaded.
         HTTPException: 400 if any feature key falls outside the valid namespace.
-        HTTPException: 500 for any unexpected scoring error.
+
+    Note:
+        Any unexpected error during scoring propagates and is handled by
+        FastAPI's default exception handler as an HTTP 500 response with body
+        ``{"detail": "Internal Server Error"}``.
     """
     bundle = _get_bundle(request)
     if bundle is None:

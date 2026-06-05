@@ -284,3 +284,57 @@ def test_predict_malformed_body_features_not_object_returns_422(
     payload = {"features": [1.0, 2.0, 3.0]}
     response = client.post("/predict", json=payload)
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Namespace boundary tests (sensor_000..sensor_589)
+# ---------------------------------------------------------------------------
+
+
+def test_predict_sensor_590_first_invalid_returns_400_naming_key(
+    client: TestClient,
+) -> None:
+    """POST /predict with sensor_590 (first INVALID key) returns 400 naming it."""
+    payload = {"features": {"sensor_590": 1.0}}
+    response = client.post("/predict", json=payload)
+    assert response.status_code == 400
+    assert "sensor_590" in response.json()["detail"]
+
+
+def test_predict_sensor_589_last_valid_returns_200(
+    client: TestClient,
+) -> None:
+    """POST /predict with sensor_589 (last VALID key) returns 200.
+
+    sensor_589 is within the sensor_000..sensor_589 namespace so it passes
+    validation; it is not in the fixture's expected_sensors (000..004) and is
+    simply ignored by score_frame (NaN-filled for missing expected sensors).
+    """
+    payload = {"features": {"sensor_589": 0.5}}
+    response = client.post("/predict", json=payload)
+    assert response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Malformed-format key tests
+# ---------------------------------------------------------------------------
+
+
+def test_predict_two_digit_sensor_key_returns_400_naming_key(
+    client: TestClient,
+) -> None:
+    """POST /predict with sensor_59 (two digits) returns 400 naming the key."""
+    payload = {"features": {"sensor_59": 1.0}}
+    response = client.post("/predict", json=payload)
+    assert response.status_code == 400
+    assert "sensor_59" in response.json()["detail"]
+
+
+def test_predict_four_digit_sensor_key_returns_400_naming_key(
+    client: TestClient,
+) -> None:
+    """POST /predict with sensor_0590 (four digits) returns 400 naming the key."""
+    payload = {"features": {"sensor_0590": 1.0}}
+    response = client.post("/predict", json=payload)
+    assert response.status_code == 400
+    assert "sensor_0590" in response.json()["detail"]
