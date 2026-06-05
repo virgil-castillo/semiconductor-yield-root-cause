@@ -109,20 +109,85 @@ class TestScoreBatch:
     def test_non_default_threshold_changes_predicted_label(
         self, tmp_path: Path
     ) -> None:
-        """A threshold of 0.9 labels only rows with score >= 0.9 as failures."""
+        """A threshold of 0.9 labels only rows with score >= 0.9 as failures.
+
+        Uses a fixed RNG seed (via _write_input_csv's rng=42 and _make_pipeline's
+        rng=0) that produces scores in [0.39, 0.57] for n_rows=20, so every row
+        flips from 0.5-threshold to 0.9-threshold, guaranteeing the discriminating
+        assertion is deterministically true.
+        """
         model_path = _write_model(tmp_path, SENSOR_COLS)
         input_path = _write_input_csv(tmp_path, SENSOR_COLS, n_rows=20)
+        output_path_05 = tmp_path / "scores_05.csv"
+        output_path_09 = tmp_path / "scores_09.csv"
+
+        result_at_05 = batch_score.score_batch(
+            model_path, input_path, output_path_05, threshold=0.5
+        )
+        result_at_09 = batch_score.score_batch(
+            model_path, input_path, output_path_09, threshold=0.9
+        )
+
+        # Labels must exactly follow the threshold rule.
+        expected_labels = (result_at_09["score"] >= 0.9).astype(int)
+        pd.testing.assert_series_equal(
+            result_at_09["predicted_label"],
+            expected_labels,
+            check_names=False,
+        )
+
+        # Discriminating: at least one label actually changed between the two
+        # thresholds (guaranteed by the fixed seeds — scores span [0.39, 0.57]).
+        labels_05 = result_at_05["predicted_label"]
+        labels_09 = result_at_09["predicted_label"]
+        assert (labels_05 != labels_09).any(), (
+            "No label differed between threshold=0.5 and threshold=0.9; "
+            "the threshold argument may not be taking effect."
+        )
+
+    def test_cli_threshold_overrides_bundle_metadata_threshold(
+        self, tmp_path: Path
+    ) -> None:
+        """The caller-supplied threshold wins over the bundle's metadata threshold.
+
+        Writes a model_metadata.json with optimal_threshold=0.01, then calls
+        score_batch with threshold=0.9.  The fixed seeds produce scores in
+        [0.43, 0.55], so every score is >= 0.01 but < 0.9.  If the metadata
+        threshold leaked through, all labels would be 1; with threshold=0.9 they
+        must all be 0.
+        """
+        model_path = _write_model(tmp_path, SENSOR_COLS)
+        input_path = _write_input_csv(tmp_path, SENSOR_COLS)  # n_rows=4, seed=42
         output_path = tmp_path / "scores.csv"
+
+        # Write metadata with a very low threshold (0.01) beside the model.
+        import json
+
+        metadata = {
+            "optimal_threshold": 0.01,
+            "model_version": "test-v1",
+            "expected_sensors": SENSOR_COLS,
+        }
+        (tmp_path / "model_metadata.json").write_text(json.dumps(metadata))
 
         result = batch_score.score_batch(
             model_path, input_path, output_path, threshold=0.9
         )
 
-        expected_labels = (result["score"] >= 0.9).astype(int)
+        # Labels must reflect the caller's 0.9, not the bundle's 0.01.
+        expected_at_09 = (result["score"] >= 0.9).astype(int)
         pd.testing.assert_series_equal(
             result["predicted_label"],
-            expected_labels,
+            expected_at_09,
             check_names=False,
+        )
+
+        # Discriminating: the labels would be different if 0.01 had been used
+        # (all scores are in [0.01, 0.9), so labels_at_0.01 would all be 1).
+        labels_at_001 = (result["score"] >= 0.01).astype(int)
+        assert (result["predicted_label"] != labels_at_001).any(), (
+            "Labels match threshold=0.01 for all rows; the bundle metadata "
+            "threshold may have overridden the caller-supplied threshold=0.9."
         )
 
     def test_no_sensor_columns_raises_value_error(self, tmp_path: Path) -> None:
