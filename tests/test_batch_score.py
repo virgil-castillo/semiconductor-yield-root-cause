@@ -1,6 +1,7 @@
 """Tests for scripts/batch_score.py — regression net for the scoring refactor."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import batch_score  # imported via conftest.py sys.path injection
@@ -111,10 +112,10 @@ class TestScoreBatch:
     ) -> None:
         """A threshold of 0.9 labels only rows with score >= 0.9 as failures.
 
-        Uses a fixed RNG seed (via _write_input_csv's rng=42 and _make_pipeline's
-        rng=0) that produces scores in [0.39, 0.57] for n_rows=20, so every row
-        flips from 0.5-threshold to 0.9-threshold, guaranteeing the discriminating
-        assertion is deterministically true.
+        Uses a fixed RNG seed (hard-coded as 42 inside _write_input_csv, plus
+        rng=0 inside _make_pipeline) that produces scores in [0.39, 0.57] for
+        n_rows=20, so every row flips from 0.5-threshold to 0.9-threshold,
+        guaranteeing the discriminating assertion is deterministically true.
         """
         model_path = _write_model(tmp_path, SENSOR_COLS)
         input_path = _write_input_csv(tmp_path, SENSOR_COLS, n_rows=20)
@@ -161,8 +162,6 @@ class TestScoreBatch:
         output_path = tmp_path / "scores.csv"
 
         # Write metadata with a very low threshold (0.01) beside the model.
-        import json
-
         metadata = {
             "optimal_threshold": 0.01,
             "model_version": "test-v1",
