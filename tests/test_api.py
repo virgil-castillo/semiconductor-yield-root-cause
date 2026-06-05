@@ -4,13 +4,17 @@ Later tasks (predict, batch) extend this file by importing the fixtures.
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
+
+import numpy as np
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
-from sklearn.dummy import DummyClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from api.main import app
 from yield_risk.scoring import ModelBundle
 
 # ---------------------------------------------------------------------------
@@ -23,20 +27,28 @@ _SENSOR_COLS = [f"sensor_{i:03d}" for i in range(5)]
 def _make_bundle() -> ModelBundle:
     """Build a tiny in-memory ModelBundle for testing without touching disk.
 
+    Uses a real LogisticRegression (fixed random_state=42) fitted on a small
+    non-collinear synthetic dataset so that ``predict_proba`` returns a varied
+    range of probabilities across different inputs (not a constant 0.5).
+    threshold=0.3.  ``feature_names_in_`` is set because the model is fitted
+    on a pandas DataFrame.
+
     Returns:
         A real ModelBundle with a fitted sklearn Pipeline, a fixed version
-        string, threshold, and expected_sensors list.
+        string ``"test_model-abc1234"``, threshold ``0.3``, and
+        ``expected_sensors`` list.
     """
+    rng = np.random.default_rng(42)
     X = pd.DataFrame(
-        [[0.1 * i for _ in _SENSOR_COLS] for i in range(10)],
+        rng.standard_normal((20, len(_SENSOR_COLS))),
         columns=_SENSOR_COLS,
     )
-    y = [0] * 5 + [1] * 5
+    y = [0] * 10 + [1] * 10
 
     pipeline = Pipeline(
         [
             ("scaler", StandardScaler()),
-            ("clf", DummyClassifier(strategy="prior")),
+            ("clf", LogisticRegression(random_state=42, max_iter=200)),
         ]
     )
     pipeline.fit(X, y)
@@ -55,31 +67,37 @@ def _make_bundle() -> ModelBundle:
 
 
 @pytest.fixture()
-def client() -> TestClient:
+def client() -> Iterator[TestClient]:
     """TestClient with a loaded model bundle (lifespan does NOT run).
 
-    Returns:
+    Sets ``app.state.bundle`` before constructing the TestClient so the state
+    is in place from the first request.  Tears down by resetting the attribute
+    to ``None`` after the test completes.
+
+    Yields:
         TestClient with app.state.bundle set to a real in-memory bundle.
     """
-    from api.main import app  # noqa: PLC0415
-
-    tc = TestClient(app, raise_server_exceptions=True)
     app.state.bundle = _make_bundle()
-    return tc
+    tc = TestClient(app, raise_server_exceptions=True)
+    yield tc
+    app.state.bundle = None
 
 
 @pytest.fixture()
-def client_no_model() -> TestClient:
+def client_no_model() -> Iterator[TestClient]:
     """TestClient with no model bundle loaded (lifespan does NOT run).
 
-    Returns:
+    Sets ``app.state.bundle`` to ``None`` before constructing the TestClient
+    so the state is in place from the first request.  Tears down by resetting
+    the attribute to ``None`` after the test completes.
+
+    Yields:
         TestClient with app.state.bundle explicitly set to None.
     """
-    from api.main import app  # noqa: PLC0415
-
-    tc = TestClient(app, raise_server_exceptions=True)
     app.state.bundle = None
-    return tc
+    tc = TestClient(app, raise_server_exceptions=True)
+    yield tc
+    app.state.bundle = None
 
 
 # ---------------------------------------------------------------------------
