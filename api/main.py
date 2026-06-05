@@ -15,12 +15,19 @@ from pathlib import Path
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request
 
-from api.schemas import HealthResponse, PredictionResponse, WaferRequest
+from api.schemas import (
+    BatchPredictionResponse,
+    BatchRequest,
+    HealthResponse,
+    PredictionResponse,
+    WaferRequest,
+)
 from yield_risk.scoring import ModelBundle, load_model_bundle, score_frame
 
 logger = logging.getLogger(__name__)
 
 MODEL_PATH = Path("models/selected_model.joblib")
+MAX_BATCH_SIZE = 10_000
 
 
 @contextlib.asynccontextmanager
@@ -162,3 +169,79 @@ def predict(payload: WaferRequest, request: Request) -> PredictionResponse:
         threshold_used=bundle.threshold,
         model_version=bundle.model_version,
     )
+
+
+@app.post("/predict/batch", response_model=BatchPredictionResponse)
+def predict_batch(payload: BatchRequest, request: Request) -> BatchPredictionResponse:
+    """Score a batch of wafers in a single vectorized pass.
+
+    Validates all wafer feature keys against the sensor_000..sensor_589 namespace,
+    builds one DataFrame with one row per wafer (missing sensors NaN-filled and
+    imputed by the pipeline), and returns one PredictionResponse per wafer in
+    input order.
+
+    Args:
+        payload: Validated BatchRequest containing a list of WaferRequest objects.
+        request: The incoming FastAPI request, used to access app.state.bundle.
+
+    Returns:
+        BatchPredictionResponse with one PredictionResponse per input wafer, in
+        input order.
+
+    Raises:
+        HTTPException: 503 if the model bundle is not loaded.
+        HTTPException: 400 if the wafers list is empty.
+        HTTPException: 413 if the batch exceeds MAX_BATCH_SIZE (10,000) wafers.
+        HTTPException: 400 if any feature key across any wafer falls outside the
+            valid sensor_000..sensor_589 namespace.
+
+    Note:
+        Any unexpected error during scoring propagates and is handled by
+        FastAPI's default exception handler as an HTTP 500 response with body
+        ``{"detail": "Internal Server Error"}``.
+    """
+    bundle = _get_bundle(request)
+    if bundle is None:
+        raise HTTPException(status_code=503, detail="Model is not loaded.")
+
+    if len(payload.wafers) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Batch must contain at least one wafer.",
+        )
+
+    if len(payload.wafers) > MAX_BATCH_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Batch size {len(payload.wafers)} exceeds maximum of {MAX_BATCH_SIZE}."
+            ),
+        )
+
+    all_bad: set[str] = set()
+    for wafer in payload.wafers:
+        all_bad.update(_invalid_feature_keys(wafer.features))
+    if all_bad:
+        bad_sorted = sorted(all_bad)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown feature keys (outside sensor_000..sensor_589): {bad_sorted}"
+            ),
+        )
+
+    df = pd.DataFrame([w.features for w in payload.wafers])
+    result = score_frame(bundle, df)
+
+    predictions: list[PredictionResponse] = [
+        PredictionResponse(
+            wafer_id=payload.wafers[i].wafer_id,
+            failure_probability=float(result["score"].iloc[i]),
+            risk_flag=bool(result["predicted_label"].iloc[i]),
+            threshold_used=bundle.threshold,
+            model_version=bundle.model_version,
+        )
+        for i in range(len(payload.wafers))
+    ]
+
+    return BatchPredictionResponse(predictions=predictions)

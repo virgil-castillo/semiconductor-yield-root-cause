@@ -338,3 +338,148 @@ def test_predict_four_digit_sensor_key_returns_400_naming_key(
     response = client.post("/predict", json=payload)
     assert response.status_code == 400
     assert "sensor_0590" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# POST /predict/batch tests
+# ---------------------------------------------------------------------------
+
+
+def test_batch_happy_path_returns_200_and_all_fields(
+    client: TestClient,
+) -> None:
+    """POST /predict/batch with 3 valid wafers returns 200 with all fields."""
+    payload = {
+        "wafers": [
+            {"wafer_id": "W-1", "features": {"sensor_000": 1.0, "sensor_001": 0.5}},
+            {"wafer_id": "W-2", "features": {"sensor_000": -1.0, "sensor_002": 2.0}},
+            {"wafer_id": "W-3", "features": {"sensor_003": 0.0, "sensor_004": -0.5}},
+        ]
+    }
+    response = client.post("/predict/batch", json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    predictions = body["predictions"]
+    assert len(predictions) == 3
+    # Check wafer_ids are echoed in input order
+    assert predictions[0]["wafer_id"] == "W-1"
+    assert predictions[1]["wafer_id"] == "W-2"
+    assert predictions[2]["wafer_id"] == "W-3"
+    # Check each prediction has all five required fields and correct constants
+    for pred in predictions:
+        assert "wafer_id" in pred
+        assert "failure_probability" in pred
+        assert "risk_flag" in pred
+        assert "threshold_used" in pred
+        assert "model_version" in pred
+        assert pred["threshold_used"] == pytest.approx(0.3)
+        assert pred["model_version"] == "test_model-abc1234"
+        prob = pred["failure_probability"]
+        assert isinstance(prob, float)
+        assert 0.0 <= prob <= 1.0
+        assert pred["risk_flag"] == (prob >= pred["threshold_used"])
+
+
+def test_batch_per_wafer_independence_and_order(
+    client: TestClient,
+) -> None:
+    """Batch predictions correspond positionally and empty features get imputed."""
+    payload = {
+        "wafers": [
+            {"wafer_id": "W-a", "features": {"sensor_000": 10.0}},
+            {"wafer_id": "W-b", "features": {}},
+            {"wafer_id": "W-c", "features": {"sensor_000": -10.0}},
+        ]
+    }
+    response = client.post("/predict/batch", json=payload)
+    assert response.status_code == 200
+    predictions = response.json()["predictions"]
+    assert len(predictions) == 3
+    # Wafer with empty features still gets a prediction (imputed)
+    assert predictions[1]["wafer_id"] == "W-b"
+    assert isinstance(predictions[1]["failure_probability"], float)
+    # Positional correctness
+    assert predictions[0]["wafer_id"] == "W-a"
+    assert predictions[2]["wafer_id"] == "W-c"
+
+
+def test_batch_empty_wafers_list_returns_400(
+    client: TestClient,
+) -> None:
+    """POST /predict/batch with empty wafers list returns 400 with detail."""
+    payload = {"wafers": []}
+    response = client.post("/predict/batch", json=payload)
+    assert response.status_code == 400
+    assert "detail" in response.json()
+
+
+def test_batch_over_size_limit_returns_413(
+    client: TestClient,
+) -> None:
+    """POST /predict/batch with 10001 wafers returns 413 with detail."""
+    wafers = [
+        {"wafer_id": f"W-{i}", "features": {}} for i in range(10001)
+    ]
+    payload = {"wafers": wafers}
+    response = client.post("/predict/batch", json=payload)
+    assert response.status_code == 413
+    assert "detail" in response.json()
+
+
+def test_batch_exactly_max_size_returns_200(
+    client: TestClient,
+) -> None:
+    """POST /predict/batch with exactly 10000 wafers returns 200 (not 413)."""
+    wafers = [
+        {"wafer_id": f"W-{i}", "features": {}} for i in range(10000)
+    ]
+    payload = {"wafers": wafers}
+    response = client.post("/predict/batch", json=payload)
+    assert response.status_code == 200
+    assert len(response.json()["predictions"]) == 10000
+
+
+def test_batch_unknown_key_in_one_wafer_returns_400_naming_key(
+    client: TestClient,
+) -> None:
+    """POST /predict/batch with an invalid key in any wafer returns 400 naming it."""
+    payload = {
+        "wafers": [
+            {"wafer_id": "W-good", "features": {"sensor_000": 1.0}},
+            {"wafer_id": "W-bad", "features": {"sensor_000": 0.5, "sensor_999": 2.0}},
+        ]
+    }
+    response = client.post("/predict/batch", json=payload)
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "sensor_999" in detail
+
+
+def test_batch_no_model_returns_503(
+    client_no_model: TestClient,
+) -> None:
+    """POST /predict/batch with no loaded model returns 503 with detail."""
+    payload = {
+        "wafers": [{"wafer_id": "W-1", "features": {"sensor_000": 1.0}}]
+    }
+    response = client_no_model.post("/predict/batch", json=payload)
+    assert response.status_code == 503
+    assert "detail" in response.json()
+
+
+def test_batch_malformed_body_wafers_not_list_returns_422(
+    client: TestClient,
+) -> None:
+    """POST /predict/batch with wafers not a list returns 422."""
+    payload = {"wafers": "not-a-list"}
+    response = client.post("/predict/batch", json=payload)
+    assert response.status_code == 422
+
+
+def test_batch_malformed_body_wafer_missing_features_returns_422(
+    client: TestClient,
+) -> None:
+    """POST /predict/batch with a wafer missing the features field returns 422."""
+    payload = {"wafers": [{"wafer_id": "W-1"}]}
+    response = client.post("/predict/batch", json=payload)
+    assert response.status_code == 422
