@@ -4,8 +4,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import joblib
 import pandas as pd
+
+from yield_risk.scoring import load_model_bundle, score_frame
 
 
 def score_batch(
@@ -36,7 +37,7 @@ def score_batch(
     Raises:
         ValueError: If the input CSV contains no sensor_ columns.
     """
-    pipeline = joblib.load(model_path)
+    bundle = load_model_bundle(model_path)
     df = pd.read_csv(input_path)
     sensor_cols = [c for c in df.columns if c.startswith("sensor_")]
     if not sensor_cols:
@@ -44,11 +45,7 @@ def score_batch(
             f"No columns starting with 'sensor_' found in {input_path}. "
             "Verify the input CSV has the expected schema."
         )
-    X = df[sensor_cols]
-    scores = pipeline.predict_proba(X)[:, 1]
-    result = df.copy()
-    result["score"] = scores
-    result["predicted_label"] = (scores >= threshold).astype(int)
+    result = score_frame(bundle, df, threshold=threshold)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(output_path, index=False)
     return result

@@ -32,6 +32,7 @@ reports/figures/*.svg
 reports/figures/*.pdf
 reports/figures/*.html
 reports/*.npz
+reports/batch_scores.csv
 
 # Jupyter
 .ipynb_checkpoints/
