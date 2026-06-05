@@ -75,6 +75,10 @@ def load_model_bundle(
     the file's sha256 hash, and ``expected_sensors`` from the pipeline's
     ``feature_names_in_`` attribute.  A warning is logged on fallback.
 
+    When the file exists, ``expected_sensors`` is taken from it if recorded,
+    otherwise derived from the pipeline's ``feature_names_in_`` attribute;
+    ``optimal_threshold`` and ``model_version`` are required.
+
     Args:
         model_path: Path to the joblib-serialised sklearn Pipeline.
         metadata_path: Path to the metadata JSON. Defaults to
@@ -87,7 +91,7 @@ def load_model_bundle(
     Raises:
         FileNotFoundError: If *model_path* does not exist.
         ValueError: If *metadata_path* exists but is missing a required key
-            (``optimal_threshold``, ``model_version``, or ``expected_sensors``).
+            (``optimal_threshold`` or ``model_version``).
     """
     pipeline: Pipeline = joblib.load(model_path)
 
@@ -100,11 +104,18 @@ def load_model_bundle(
         try:
             threshold = float(meta["optimal_threshold"])
             model_version = str(meta["model_version"])
-            expected_sensors: list[str] = list(meta["expected_sensors"])
         except KeyError as exc:
             raise ValueError(
                 f"Metadata {metadata_path} is missing required key: {exc}"
             ) from exc
+        # expected_sensors is optional in the metadata: use it if recorded,
+        # otherwise fall back to the fitted pipeline's input feature names.
+        recorded_sensors = meta.get("expected_sensors")
+        expected_sensors: list[str] = (
+            list(recorded_sensors)
+            if recorded_sensors
+            else _sensor_names_from_pipeline(pipeline)
+        )
     else:
         logger.warning(
             "Metadata file not found at %s; using defaults (threshold=0.5, "

@@ -132,6 +132,34 @@ def test_load_model_bundle_raises_value_error_on_missing_metadata_key(
         load_model_bundle(model_path)
 
 
+def test_load_model_bundle_metadata_without_expected_sensors_falls_back(
+    tmp_path: Path,
+) -> None:
+    """When metadata omits expected_sensors, derive them from the pipeline.
+
+    Per the design (spec line 82) expected_sensors come from the metadata
+    ``if recorded, else the fitted pipeline's input feature names`` — a present
+    metadata file that does not record the field must NOT raise.
+    """
+    pipeline = _make_pipeline()
+    model_path = tmp_path / "model.joblib"
+    joblib.dump(pipeline, model_path)
+    metadata = {
+        "optimal_threshold": 0.2,
+        "model_version": "v9.9.9",
+        # 'expected_sensors' deliberately omitted
+    }
+    metadata_path = tmp_path / "model_metadata.json"
+    metadata_path.write_text(json.dumps(metadata))
+
+    bundle = load_model_bundle(model_path)
+
+    # threshold/version still come from the file; sensors fall back to pipeline.
+    assert bundle.threshold == 0.2
+    assert bundle.model_version == "v9.9.9"
+    assert bundle.expected_sensors == SENSOR_COLS
+
+
 # ---------------------------------------------------------------------------
 # load_model_bundle — fallback (no metadata file)
 # ---------------------------------------------------------------------------
