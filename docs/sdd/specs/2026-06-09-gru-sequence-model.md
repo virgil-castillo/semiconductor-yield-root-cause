@@ -7,7 +7,7 @@
 
 ## 0. Scope, lens, non-goals
 
-**Scope.** Add an ISOLATED PyTorch GRU experiment to the `yield_risk` package (src layout, Python >= 3.12). The model treats ordered SECOM sensor observations as a pseudo-sequence with learned per-sensor-ID embeddings, and predicts wafer pass/fail from either a complete sensor row or the current available sensor window. It reuses `data/processed/{train,test}.csv`, `yield_risk.config`, and `yield_risk.evaluate`'s plot/metric helpers, but does not modify the tabular pipeline.
+**Scope.** Add an ISOLATED PyTorch GRU experiment to the `yield_risk` package (src layout, Python >= 3.12). The model treats ordered SECOM sensor observations as a pseudo-sequence with learned per-sensor-ID embeddings, and predicts wafer pass/fail from either a complete raw sensor row or the current available raw sensor window. It reuses `yield_risk.data.load_secom`, `yield_risk.validation.validate_secom`, `yield_risk.config`, and `yield_risk.evaluate`'s plot/metric helpers, but does not modify the tabular pipeline.
 
 **Non-goals (MUST NOT modify).** `src/yield_risk/evaluate.py` (`ClassificationMetrics` shape is frozen — tabular pipeline depends on it), `src/yield_risk/model.py`, `src/yield_risk/config.py`, `src/yield_risk/__init__.py`, `scripts/train_models.py`, `scripts/evaluate_model.py`, `reports/model_comparison.json`, `models/model_metadata.json`, or any existing artifact. The GRU writes only to namespaced artifacts (§9).
 
@@ -78,32 +78,50 @@ time; the supported environment is expected to install the required dependency.
 
 ## 2. Data contract and pinned dtypes
 
-Source files: `cfg.paths.processed_dir / "train.csv"` and `.../ "test.csv"`.
+Source files: raw SECOM files under `cfg.paths.raw_dir`, loaded via
+`yield_risk.data.load_secom(cfg.paths.raw_dir)` and validated with
+`yield_risk.validation.validate_secom`.
 
-- Sensor columns: `sensor_cols = [c for c in df.columns if c.startswith("sensor_")]`, in DataFrame column order. Length = `n_sensors` (~474 in real data; never hard-coded).
+- Raw sensor columns: `raw_sensor_cols = [c for c in df.columns if c.startswith("sensor_")]`, in raw DataFrame column order. Length is the raw SECOM sensor count (~590; never hard-coded).
+- Model sensor columns: `sensor_cols = preprocessor.sensor_cols`, the retained
+  columns after train-only high-missing filtering, median imputation,
+  low-variance filtering, and high-correlation filtering. Length =
+  `n_sensors` (~474 with default thresholds; never hard-coded).
 - A model input is a **current sensor window**, not necessarily a complete row.
-  A window is represented by normalized sensor values plus the matching
-  zero-based sensor-ID indices from `sensor_cols`.
-- Full-row scoring is the special case where `window_sensor_cols == sensor_cols`.
+  A window is represented externally as raw sensor values plus matching raw
+  sensor names. The sequence preprocessing pipeline drops unusable sensors,
+  imputes missing values for retained sensors, standardizes retained values,
+  and returns normalized values plus zero-based sensor-ID indices from
+  `sensor_cols`.
+- Full-row scoring is the special case where `window_sensor_cols == raw_sensor_cols`.
 - Prefix/current-progress scoring is the primary use case: for a wafer where
-  only the first `k` ordered sensors are available, pass those `k` values and
-  sensor IDs. Contiguous or sparse windows are also valid as long as every
-  window sensor name exists in the training-time `sensor_cols`.
+  only the first `k` ordered raw sensors are available, pass those `k` raw
+  values and names. Sensors dropped during fitting are ignored, so the actual
+  GRU window may be shorter than the raw input window. Contiguous or sparse
+  windows are also valid as long as every window sensor name exists in the
+  training-time `raw_sensor_cols` and at least one supplied sensor survives
+  preprocessing.
 - `df["label"]`: int 0/1 (0=pass, 1=fail).
 - `df["timestamp"]`: string, ignored by the GRU.
 
 **Canonical dtypes (pinned at every boundary):**
-- Raw sensor values: `np.float32` in numpy.
+- Raw sensor values: `np.float32` in numpy; `NaN` is allowed before imputation,
+  `+/-inf` is not allowed.
+- Imputed retained sensor values: `np.float32` in numpy, finite.
 - Normalized window values: `np.float32` in numpy → `torch.float32` tensors,
   shape `(batch, window_size)`.
 - Labels: `np.int64` in numpy; loss targets are `torch.float32` (BCEWithLogitsLoss requires float targets).
 - Sensor-ID indices: `np.int64` in numpy → `torch.int64` tensors, shape
   `(batch, window_size)` (required by `nn.Embedding`).
+- Imputation medians: `np.float32`, shape `(n_sensors,)`, persisted with the
+  sequence preprocessing pipeline and aligned to retained `sensor_cols`.
 - Scaler mean/scale: `np.float32`, shape `(n_sensors,)`, persisted with the
   sequence preprocessing pipeline.
 - `y_prob` returned to sklearn metrics: `np.float64` (metric stability).
 
-Extraction idiom: `df[sensor_cols].to_numpy(dtype=np.float32)`, `df["label"].to_numpy(dtype=np.int64)`.
+Extraction idiom before fitting/transformation:
+`df[raw_sensor_cols].to_numpy(dtype=np.float32)`,
+`df["label"].to_numpy(dtype=np.int64)`.
 
 ---
 
@@ -111,66 +129,154 @@ Extraction idiom: `df[sensor_cols].to_numpy(dtype=np.float32)`, `df["label"].to_
 
 ### 3.1 `SequenceSensorPipeline`
 
-The GRU must never receive raw, unnormalized sensor magnitudes. Fit one
-sequence-specific preprocessing pipeline on the training sub-split, persist it
-with the checkpoint, and reload it for every inference/evaluation path.
+The GRU must never receive raw, unnormalized sensor magnitudes or unfiltered
+raw SECOM columns. Fit one sequence-specific raw-to-sequence preprocessing
+pipeline on the training sub-split, persist it with the checkpoint, and reload
+it for every inference/evaluation path.
 
 Do not reuse the existing tabular model pipeline directly: tabular pipelines
 include a classifier, and only some tabular model families include a
-`StandardScaler`. The sequence pipeline reuses the same sklearn
-`StandardScaler` semantics but owns its fit statistics and sensor ordering for
-the GRU experiment.
+`StandardScaler`. The sequence pipeline reuses the same cleaning decisions as
+`yield_risk.preprocess.run_preprocessing` (high-missing drop, median
+imputation, low-variance drop, high-correlation drop), then applies
+`StandardScaler` semantics and owns its fit statistics, retained sensor order,
+and raw-input contract for the GRU experiment.
 
-Plain `@dataclass` in `sequence_models.py` (no torch needed to fit):
+Do not call `run_preprocessing` directly for sequence training/evaluation: it
+materializes processed CSV-style outputs, while the GRU checkpoint must persist
+the fitted raw preprocessing metadata needed to transform future raw
+current-window inputs.
+
+Use two plain dataclasses in `sequence_models.py` (no torch needed to fit).
+`RawSensorCleaner` is the internal raw-data stage; `SequenceSensorPipeline` is
+the single public/checkpointed preprocessing object used by training,
+evaluation, and current-window inference.
 
 ```python
 @dataclass
+class RawSensorCleaner:
+    raw_sensor_cols: list[str]
+    sensor_cols: list[str]  # retained model sensors after all filtering
+    medians: np.ndarray     # shape (n_sensors,), float32, retained sensors
+    dropped_high_missing: list[str]
+    dropped_low_variance: list[str]
+    dropped_high_correlation: list[str]
+    missing_threshold: float
+    variance_threshold: float
+    correlation_threshold: float
+
+    @classmethod
+    def fit(
+        cls,
+        x_raw: np.ndarray,
+        raw_sensor_cols: list[str],
+        missing_threshold: float,
+        variance_threshold: float,
+        correlation_threshold: float,
+    ) -> RawSensorCleaner: ...
+    def transform_full(self, x_raw: np.ndarray, raw_sensor_cols: list[str]) -> np.ndarray: ...
+    def transform_window(self, x_raw: np.ndarray, window_sensor_cols: list[str]) -> tuple[np.ndarray, list[str]]: ...
+
+
+@dataclass
 class SequenceSensorPipeline:
-    sensor_cols: list[str]
+    cleaner: RawSensorCleaner
     mean: np.ndarray   # shape (n_sensors,), float32
     scale: np.ndarray  # shape (n_sensors,), float32, zeros replaced by 1.0
 
+    @property
+    def raw_sensor_cols(self) -> list[str]: ...
+    @property
+    def sensor_cols(self) -> list[str]: ...
     @classmethod
-    def fit(cls, x: np.ndarray, sensor_cols: list[str]) -> SequenceSensorPipeline: ...
-    def transform_full(self, x: np.ndarray, sensor_cols: list[str]) -> tuple[np.ndarray, np.ndarray]: ...
-    def transform_window(self, x: np.ndarray, window_sensor_cols: list[str]) -> tuple[np.ndarray, np.ndarray]: ...
+    def fit(
+        cls,
+        x_raw: np.ndarray,
+        raw_sensor_cols: list[str],
+        missing_threshold: float,
+        variance_threshold: float,
+        correlation_threshold: float,
+    ) -> SequenceSensorPipeline: ...
+    def transform_full(self, x_raw: np.ndarray, raw_sensor_cols: list[str]) -> tuple[np.ndarray, np.ndarray]: ...
+    def transform_window(self, x_raw: np.ndarray, window_sensor_cols: list[str]) -> tuple[np.ndarray, np.ndarray]: ...
     def to_dict(self) -> dict[str, object]: ...
     @classmethod
     def from_dict(cls, d: dict[str, object]) -> SequenceSensorPipeline: ...
 ```
 
-Math and dtypes:
-- Fit with `sklearn.preprocessing.StandardScaler` on the TRAIN sub-split matrix
-  after the validation carve-out. Persist `scaler.mean_` and `scaler.scale_`
-  as `np.float32` arrays rather than the sklearn object itself.
+Stage responsibilities:
+- `RawSensorCleaner.fit(...)` computes every raw cleaning decision from the
+  train sub-split: raw schema, high-missing drops, medians, low-variance drops,
+  high-correlation drops, retained `sensor_cols`, and thresholds.
+- `RawSensorCleaner.transform_full(...)` replays those raw cleaning decisions
+  for a full raw row matrix and returns finite retained sensor values in
+  `sensor_cols` order.
+- `RawSensorCleaner.transform_window(...)` replays those raw cleaning decisions
+  for a raw current window and returns finite retained sensor values plus the
+  retained column names in the caller's raw window order after dropped columns
+  are removed.
+- `SequenceSensorPipeline.fit(...)` is intentionally thin orchestration:
+  fit `RawSensorCleaner`, transform the train sub-split through it, fit
+  `StandardScaler` on the cleaned retained matrix, and persist the cleaner plus
+  scaler `mean`/`scale`.
+- `SequenceSensorPipeline.transform_full/window(...)` delegates raw cleaning to
+  `RawSensorCleaner`, then applies scaling and maps retained column names to
+  zero-based sensor IDs.
+
+Required cleaning/scaling behavior:
+- Fit on RAW train-sub-split matrix after the validation carve-out. `NaN` is
+  allowed during fitting; `+/-inf` raises before imputation.
+- Compute missing fractions on `raw_sensor_cols`; drop columns with missing
+  fraction strictly above `missing_threshold` (same strict `>` semantics as
+  `drop_high_missing`).
+- Compute per-column medians on surviving columns using train-sub-split rows
+  only; impute `NaN` values with those medians. If any retained median is not
+  finite, raise rather than silently inventing values.
+- Drop columns whose variance after imputation is strictly below
+  `variance_threshold` (same strict `<` semantics as `drop_low_variance`).
+- Drop one column from each highly correlated pair after imputation and
+  low-variance filtering, using the upper triangle of absolute Pearson
+  correlation and dropping the later column when correlation is strictly above
+  `correlation_threshold` (same strict `>` semantics as
+  `drop_high_correlation`).
+- Fit `sklearn.preprocessing.StandardScaler` on the final retained TRAIN
+  sub-split matrix. Persist `scaler.mean_` and `scaler.scale_` as `np.float32`
+  arrays rather than the sklearn object itself.
 - **scale==0 guard:** StandardScaler sets zero-variance feature scale to `1.0`;
   preserve that behavior. A constant column maps to all-zeros after centering.
-- `transform_full` validates that `sensor_cols == self.sensor_cols`, applies
-  `(x - mean) / scale`, returns `(x_norm, sensor_ids)` where `x_norm` is
-  `np.float32` shape `(n_rows, n_sensors)` and `sensor_ids` is `np.int64`
-  shape `(n_rows, n_sensors)` containing tiled `np.arange(n_sensors)`.
-- `transform_window` accepts raw window values shape `(n_rows, window_size)` and
-  the exact `window_sensor_cols` for those columns. It looks up each window
-  column in the training-time `sensor_cols`, applies that sensor's saved
-  `mean`/`scale`, and returns `(x_norm, sensor_ids)` with shape
-  `(n_rows, window_size)`.
-- `to_dict`/`from_dict` use lists for `sensor_cols`, `mean`, and `scale`
-  (portable, JSON-comparable in tests).
+- `transform_full` validates that `raw_sensor_cols == self.raw_sensor_cols`,
+  applies the saved raw cleaning decisions through `RawSensorCleaner`, scales
+  with `(x - mean) / scale`, then returns `(x_norm, sensor_ids)` where
+  `x_norm` is `np.float32` shape `(n_rows, n_sensors)` and `sensor_ids` is
+  `np.int64` shape `(n_rows, n_sensors)` containing tiled
+  `np.arange(n_sensors)`.
+- `transform_window` accepts raw window values shape `(n_rows, raw_window_size)`
+  and exact `window_sensor_cols` for those raw columns. It validates raw names,
+  delegates dropped-sensor filtering and median imputation to
+  `RawSensorCleaner`, applies each retained sensor's saved `mean`/`scale`, and
+  returns `(x_norm, sensor_ids)` with shape `(n_rows, retained_window_size)`.
+  The retained window order follows the caller's raw window order after dropped
+  columns are removed.
+- `to_dict`/`from_dict` use lists for all column lists and arrays
+  (`raw_sensor_cols`, `sensor_cols`, `medians`, `mean`, `scale`, drop lists,
+  thresholds) so the metadata is portable and JSON-comparable in tests.
 
 Errors:
-- `fit`: `ValueError("SequenceSensorPipeline.fit expects a 2-D array")` if `x.ndim != 2`; `ValueError("SequenceSensorPipeline.fit requires at least 1 row and 1 column")` if `x.shape[0] == 0 or x.shape[1] == 0`; `ValueError("sensor_cols length must match x columns")` if `len(sensor_cols) != x.shape[1]`.
-- `transform_full`: `ValueError("Sensor columns differ from fitted pipeline")`
+- `fit`: `ValueError("SequenceSensorPipeline.fit expects a 2-D array")` if `x_raw.ndim != 2`; `ValueError("SequenceSensorPipeline.fit requires at least 1 row and 1 column")` if `x_raw.shape[0] == 0 or x_raw.shape[1] == 0`; `ValueError("raw_sensor_cols length must match x columns")` if `len(raw_sensor_cols) != x_raw.shape[1]`; `ValueError("Sensor matrix contains infinite values")` if any raw value is `+/-inf`; `ValueError("No sensor columns remain after preprocessing")` if the drop filters remove every sensor; `ValueError("Median imputation produced non-finite values")` if imputed retained data still contains `NaN`/`inf`.
+- `transform_full`: `ValueError("Raw sensor columns differ from fitted pipeline")`
   if the column list differs in membership or order.
 - `transform_window`: `ValueError("Window sensor columns must be non-empty")`
   for an empty window; `ValueError(f"Unknown window sensor column: {col}")`
-  for any sensor not seen during fit; `ValueError(f"Expected {len(window_sensor_cols)} window columns, got {x.shape[1]}")` on width mismatch.
+  for any raw sensor not seen during fit; `ValueError(f"Expected {len(window_sensor_cols)} window columns, got {x_raw.shape[1]}")` on width mismatch; `ValueError("Window contains no retained sensor columns after preprocessing")` when every supplied raw sensor was dropped during fit; `ValueError("Sensor matrix contains infinite values")` if any supplied raw value is `+/-inf`; `ValueError("Median imputation produced non-finite values")` if retained values are still non-finite after imputation.
 
 **Leakage rule (fit AFTER val carve-out).** The preprocessing pipeline is fit
 ONLY on the train sub-split matrix produced after the val carve-out (§10.1).
-Val and test are transformed with these train statistics. The val set is used
-for per-epoch monitoring so it must not contribute to fit statistics. Persisted
-in the checkpoint so eval reloads the training-fitted preprocessing pipeline
-and never re-fits.
+All drop decisions, medians, correlation decisions, and scaler statistics come
+from that train sub-split only. Val, test, and current-window inference are
+transformed with these train statistics. The val set is used for per-epoch
+monitoring so it must not contribute to preprocessing fit statistics.
+Persisted in the checkpoint so eval/current inference reloads the
+training-fitted preprocessing pipeline and never re-fits.
 
 ### 3.2 pos_weight — RAISE on degenerate labels
 
@@ -312,15 +418,15 @@ Flat keys are simpler to validate key-by-key and compare in tests. Saved via `to
 |---|---|---|
 | `format_version` | `int` | `1` |
 | `model_state_dict` | `dict[str, Tensor]` | `model.state_dict()` |
-| `n_sensors` | `int` | from train.csv |
+| `n_sensors` | `int` | retained model sensors after sequence preprocessing |
 | `emb_dim` | `int` | |
 | `hidden_size` | `int` | |
 | `num_layers` | `int` | |
 | `dropout` | `float` | user-requested value |
 | `early_prediction` | `bool` | |
 | `timestep_weighting` | `str` | `"none"`/`"linear"`/`"sqrt"`; stored even when `early_prediction=False` (ignored on load then) |
-| `preprocessor` | `dict[str, object]` | `SequenceSensorPipeline.to_dict()` with `sensor_cols`, `mean`, `scale` |
-| `sensor_cols` | `list[str]` | ordered fit-time names |
+| `preprocessor` | `dict[str, object]` | `SequenceSensorPipeline.to_dict()` with raw schema, retained schema, drop lists, medians, scaler stats, thresholds |
+| `sensor_cols` | `list[str]` | ordered retained fit-time model sensor names |
 | `pos_weight` | `float` | train-only n_neg/n_pos |
 | `random_seed` | `int` | |
 | `epochs` | `int` | epochs actually trained |
@@ -341,8 +447,9 @@ def save_checkpoint(path: Path, model: SecomGRU, preprocessor: SequenceSensorPip
     """Serialize model + preprocessing pipeline for leakage-free eval.
 
     Raises:
-        ValueError: If len(preprocessor.mean) != model.n_sensors or
-            len(sensor_cols) != model.n_sensors.
+        ValueError: If len(preprocessor.cleaner.medians),
+            len(preprocessor.mean), len(preprocessor.scale), or
+            len(sensor_cols) do not equal model.n_sensors.
     """
 
 @dataclass
@@ -411,15 +518,16 @@ def build_timestep_weights(window_size: int, scheme: str, device: str) -> Tensor
 
 | Case | Behavior |
 |---|---|
-| `train.csv`/`test.csv` missing | `prepare_data` (§10.1) raises `FileNotFoundError(f"Processed data not found: {path}")`; CLI → `exit(1)`. |
-| Non-finite values in sensor matrix | After float32 cast, assert `np.isfinite(x).all()`, else `ValueError("Sensor matrix contains non-finite values; expected median-imputed data")`. |
-| `n_sensors == 0` (no sensor cols) | `prepare_data` raises `ValueError("No sensor_ columns found")`; `build_gru`/`SequenceSensorPipeline.fit` also raise `ValueError`. CLI → `exit(1)`. |
+| Raw SECOM files missing | `load_secom` raises `FileNotFoundError`; CLI → `exit(1)`. |
+| `NaN` values in raw sensor matrix | Allowed; retained sensors are imputed with train-sub-split medians saved in `SequenceSensorPipeline`. |
+| Infinite values in raw sensor matrix | `SequenceSensorPipeline.fit`/`transform_*` raises `ValueError("Sensor matrix contains infinite values")`. |
+| `n_sensors == 0` after preprocessing | `prepare_data`/`SequenceSensorPipeline.fit` raises `ValueError("No sensor columns remain after preprocessing")`; `build_gru` also raises `ValueError`. CLI → `exit(1)`. |
 | `n_sensors == 1` | Allowed; full row and any valid window have `W=1`; early-mode final timestep == only timestep. |
 | `window_size == 0` | Dataset/model/preprocessor raise `ValueError("window_size must be >= 1")` or `ValueError("Window sensor columns must be non-empty")`. |
 | Unknown window sensor | `SequenceSensorPipeline.transform_window` raises `ValueError(f"Unknown window sensor column: {col}")`. |
+| Window contains only dropped sensors | `SequenceSensorPipeline.transform_window` raises `ValueError("Window contains no retained sensor columns after preprocessing")`. |
 | zero-variance column | scale element → 1.0 (§3.1); column all zeros after centering; no NaN/div-by-zero. |
-| Sensor-column mismatch (train vs test) | `prepare_data` raises `ValueError("Train and test sensor columns differ")`. |
-| Sensor-column mismatch (checkpoint vs eval data) | `evaluate` (§10.3) raises `ValueError(f"Sensor columns mismatch: checkpoint has {len(a)}, eval data has {len(b)}")` when lists differ in membership or order. CLI → `exit(1)`. |
+| Raw sensor-column mismatch (checkpoint vs eval data) | `evaluate` (§10.3) raises `ValueError(f"Raw sensor columns mismatch: checkpoint has {len(a)}, eval data has {len(b)}")` when full-row lists differ in membership or order. CLI → `exit(1)`. |
 | Single-class minibatch (train) | pos_weight is computed once on the full train sub-split, not per-batch; BCE on a one-class batch is valid. No special handling. |
 | `compute_pos_weight` 0-pos / 0-neg / empty | Raises `ValueError` (§3.2). CLI → `exit(1)`. |
 | Single-class `y_true` at metric time | `roc_auc`/`pr_auc` → `nan` with `warnings.warn`; confusion matrix kept 2x2 via `labels=[0,1]`; precision/recall/f1/balanced_accuracy still computed (§11). |
@@ -428,7 +536,7 @@ def build_timestep_weights(window_size: int, scheme: str, device: str) -> Tensor
 | Bad checkpoint `format_version` | `load_checkpoint` raises `ValueError`. |
 | Missing checkpoint file | `load_checkpoint` raises `FileNotFoundError`. |
 | CUDA requested but unavailable | `resolve_device` raises `ValueError("CUDA requested but not available")`. CLI → `exit(1)`. (§10.2.) |
-| `val_size` rounds to 0 val rows | Empty val arrays; per-epoch validation skipped (log `"val split empty; skipping validation"`); preprocessing pipeline fit on all train.csv rows; training/checkpoint proceed. |
+| `val_size` rounds to 0 val rows | Empty val arrays; per-epoch validation skipped (log `"val split empty; skipping validation"`); preprocessing pipeline fit on all train rows after the held-out test split; training/checkpoint proceed. |
 | `epochs == 0` | Loop runs zero epochs; checkpoint saved with seeded-initialized weights and `epochs=0`; no exception (smoke-test friendly). |
 
 ---
@@ -548,40 +656,63 @@ class WindowArrays:
 class PreparedData:
     train_windows: list[WindowArrays]
     val_windows: list[WindowArrays]    # may be empty
-    x_test_raw: np.ndarray       # (n_te, n_sensors) float32, RAW (un-normalized)
+    x_test_raw: np.ndarray       # (n_te, n_raw_sensors) float32, RAW
     y_test: np.ndarray           # (n_te,) int64
-    sensor_cols: list[str]
+    raw_sensor_cols: list[str]
+    sensor_cols: list[str]       # retained model sensors
     preprocessor: SequenceSensorPipeline
     pos_weight: float
 
 def prepare_data(
-    processed_dir: Path,
+    raw_dir: Path,
+    test_size: float,
     val_size: float,
     random_seed: int,
+    missing_threshold: float,
+    variance_threshold: float,
+    correlation_threshold: float,
     window_sizes: tuple[int, ...] | None = None,
 ) -> PreparedData:
-    """Load CSVs, split train/val, fit preprocessing, and build windows.
+    """Load raw SECOM data, split rows, fit preprocessing, and build windows.
 
     Raises:
-        FileNotFoundError: If a CSV is missing.
-        ValueError: For empty sensor set, non-finite values, train/test
-            sensor-column mismatch, or undefined pos_weight.
+        FileNotFoundError: If raw SECOM files are missing.
+        ValueError: For an invalid raw schema, no retained sensors, infinite
+            values, failed imputation, or undefined pos_weight.
     """
 ```
 Pinned order (leakage controls):
-1. Read `train.csv`, `test.csv` (FileNotFoundError if absent).
-2. `sensor_cols` from train column order; validate test has identical `sensor_cols` (same order) else `ValueError("Train and test sensor columns differ")`. Empty set → `ValueError("No sensor_ columns found")`.
-3. Assert finiteness on all sensor matrices.
-4. Stratified split of TRAIN rows into train/val via sklearn `train_test_split(test_size=val_size, stratify=label, random_state=random_seed)`. `test.csv` is the held-out test set, never split. If stratify is infeasible (a class has <2 rows) or `val_size <= 0`, val is empty and the preprocessing pipeline is fit on all train rows.
-5. `SequenceSensorPipeline.fit` on the TRAIN sub-split only (after val carve-out).
-6. Build train/val `WindowArrays` blocks:
+1. Read raw data with `load_secom(raw_dir)` and validate with
+   `validate_secom(raw_df)`.
+2. `raw_sensor_cols` from raw column order. Empty set ->
+   `ValueError("No raw sensor_ columns found")`.
+3. Cast the raw sensor matrix to `np.float32`; allow `NaN`, reject `+/-inf`
+   via `SequenceSensorPipeline`.
+4. Stratified split of RAW rows into train/test via
+   `train_test_split(test_size=test_size, stratify=label,
+   random_state=random_seed)`. The test split is held out and never
+   contributes to any preprocessing fit statistic.
+5. Stratified split of TRAIN rows into train/val via
+   `train_test_split(test_size=val_size, stratify=label,
+   random_state=random_seed)`. If stratify is infeasible (a class has <2 rows)
+   or `val_size <= 0`, val is empty and the preprocessing pipeline is fit on
+   all post-test-split train rows.
+6. `SequenceSensorPipeline.fit` on the TRAIN sub-split only (after val
+   carve-out), passing `missing_threshold`, `variance_threshold`, and
+   `correlation_threshold`.
+7. Build train/val `WindowArrays` blocks:
    - If `window_sizes is None`, call `preprocessor.transform_full(...)` and
      create one full-row block.
    - If `window_sizes` is provided, create one fixed-width prefix block per
-     valid size. Each block has shape `(n_wafers, W)` and can use normal
-     DataLoader collation without padding. Training iterates all blocks.
-7. `x_test_raw` kept RAW (normalized later by `evaluate` using the checkpoint preprocessor — guarantees eval-time leakage-freedom even if the caller never saw train stats).
-8. `compute_pos_weight` on the train sub-split labels before window expansion, so class weighting reflects wafer counts rather than augmented window counts.
+     valid size over the retained `preprocessor.sensor_cols`. Each block has
+     shape `(n_wafers, W)` and can use normal DataLoader collation without
+     padding. Training iterates all blocks.
+8. `x_test_raw` kept RAW with `raw_sensor_cols` order (cleaned/normalized later
+   by `evaluate` using the checkpoint preprocessor, which guarantees
+   eval-time leakage-freedom even if the caller never saw train stats).
+9. `compute_pos_weight` on the train sub-split labels before window expansion,
+   so class weighting reflects wafer counts rather than augmented window
+   counts.
 
 ### 10.2 Training loop — fixed epochs, no early stopping (maintainer decision)
 
@@ -641,8 +772,8 @@ def evaluate(checkpoint: LoadedCheckpoint, x_window_raw: np.ndarray, y_true: np.
     """Compute probabilities and metrics for a raw sensor window.
 
     Steps:
-      1. Normalize RAW x_window_raw with checkpoint.preprocessor and
-         window_sensor_cols.
+      1. Clean, impute, filter, and normalize RAW x_window_raw with
+         checkpoint.preprocessor and window_sensor_cols.
       2. Batch through predict_logits(model, x, sensor_ids) -> sigmoid ->
          y_prob (n_rows,) float64.
       3. metrics = compute_sequence_metrics(y_true, y_prob, threshold).
@@ -655,11 +786,13 @@ def evaluate(checkpoint: LoadedCheckpoint, x_window_raw: np.ndarray, y_true: np.
     """
 ```
 
-For standard held-out evaluation, the CLI passes the complete test matrix and
-`checkpoint.sensor_cols`, so metrics remain comparable to the tabular baseline.
-For current-window inference, callers pass only the currently available sensor
-columns and raw values; the loaded preprocessor applies the training-time
-normalization for exactly those sensors.
+For standard held-out evaluation, the CLI passes the complete raw test matrix
+and `checkpoint.preprocessor.raw_sensor_cols`, so metrics remain comparable to
+the tabular baseline while preserving train-only preprocessing statistics. For
+current-window inference, callers pass only the currently available raw sensor
+columns and values; the loaded preprocessor drops any sensors removed during
+training, imputes missing retained values, and applies training-time
+normalization for exactly the retained sensors in that window.
 
 **Decision threshold — 0.5 default, CLI-overridable.** ROC-AUC/PR-AUC (the primary comparison metrics) are threshold-free, so the headline comparison is fair at any threshold. `pos_weight` rebalances the loss, so GRU logits are NOT calibrated to the tabular cost matrix; borrowing the tabular cost-optimal threshold (0.08) would be misleading. Report thresholded metrics at the neutral 0.5 operating point; expose `--threshold`. Documented in `docs/sequence_model.md`.
 
@@ -763,7 +896,9 @@ Both use `argparse`, fully typed, `main() -> None`, `if __name__ == "__main__": 
 
 ### 13.1 `scripts/train_sequence_model.py`
 
-Loads `train.csv` only (never `test.csv`). Loads `TrainConfig` from `--config`, then applies CLI overrides (§10.0 semantics).
+Loads raw SECOM data via `load_secom(cfg.paths.raw_dir)` and performs its own
+leakage-free train/test and train/val splits. Loads `TrainConfig` from
+`--config`, then applies CLI overrides (§10.0 semantics).
 
 | Flag | Type | Default | Meaning |
 |---|---|---|---|
@@ -783,7 +918,12 @@ Loads `train.csv` only (never `test.csv`). Loads `TrainConfig` from `--config`, 
 | `--window-sizes` | comma-separated ints | None→config | prefix window sizes for training augmentation |
 | `--checkpoint` | Path | `models_dir/sequence_gru.pt` | output checkpoint |
 
-Behavior: `load_config()`, `load_sequence_config(args.config)`, apply overrides, `prepare_data(processed_dir, config.val_size, config.seed, config.window_sizes)`, `train`, `save_checkpoint`, write `sequence_train_history.json`. Prints final-epoch train/val loss and the checkpoint path.
+Behavior: `load_config()`, `load_sequence_config(args.config)`, apply
+overrides, `prepare_data(cfg.paths.raw_dir, cfg.run.test_size, config.val_size,
+config.seed, cfg.run.missing_threshold, cfg.run.variance_threshold,
+cfg.run.correlation_threshold, config.window_sizes)`, `train`,
+`save_checkpoint`, write `sequence_train_history.json`. Prints final-epoch
+train/val loss and the checkpoint path.
 
 ### 13.2 `scripts/evaluate_sequence_model.py`
 
@@ -795,14 +935,17 @@ Behavior: `load_config()`, `load_sequence_config(args.config)`, apply overrides,
 | `--metrics-out` | Path | `reports_dir/sequence_model_metrics.json` | metrics JSON |
 | `--comparison-out` | Path | `reports_dir/sequence_model_comparison.json` | comparison JSON (csv sibling auto) |
 | `--figures-dir` | Path | `cfg.paths.figures_dir` | figure output dir |
-| `--window-size` | int | None | score the first N fitted sensor columns instead of the full row |
+| `--window-size` | int | None | score the first N raw sensor columns instead of the full row |
 | `--window-sensors` | comma-separated names | None | explicit sensor window; mutually exclusive with `--window-size` |
 | `--no-figures` | store_true | False | skip figure generation |
 
-Behavior: `load_checkpoint`, read `test.csv` (raw), choose a scoring window
-(full fitted `sensor_cols` by default, first `--window-size` columns, or
-explicit `--window-sensors`), call `evaluate` (normalizes via checkpoint
-preprocessor), `save_sequence_metrics`, generate the three `sequence_*` figures
+Behavior: `load_checkpoint`, load raw SECOM data with `load_secom`, reproduce
+the held-out test row split with `cfg.run.test_size` and the checkpoint's
+`random_seed`, choose a
+scoring window (full `preprocessor.raw_sensor_cols` by default, first
+`--window-size` raw columns, or explicit raw `--window-sensors`), call
+`evaluate` (cleans/imputes/drops/scales via checkpoint preprocessor),
+`save_sequence_metrics`, generate the three `sequence_*` figures
 (unless `--no-figures`; ROC/PR skipped when AUC nan), `load_tabular_baseline`,
 `write_baseline_comparison`. Prints a `format_report`-style summary plus a
 `Balanced Acc:` line and the verdict.
@@ -819,11 +962,13 @@ Create `docs/sequence_model.md`:
 - **Evaluate:** `python scripts/evaluate_sequence_model.py`.
 - **Current-window scoring:** explain that the model accepts raw sensor values
   plus the matching sensor names for the current window; the loaded checkpoint
-  reuses the training-fitted `SequenceSensorPipeline` to normalize those exact
+  reuses the training-fitted `SequenceSensorPipeline` to drop sensors rejected
+  during training, impute missing retained values, and normalize the retained
   sensors before inference.
-- **Normalization:** sensor values are standardized with training-only
-  `StandardScaler` statistics persisted in the checkpoint; inference never
-  re-fits normalization on eval/current data.
+- **Raw preprocessing:** the sequence checkpoint owns high-missing filtering,
+  median imputation, low-variance filtering, high-correlation filtering, and
+  `StandardScaler` statistics fitted on the train sub-split only. Inference
+  never re-fits any preprocessing decision on eval/current data.
 - **Interpreting results:** read `sequence_model_comparison.json` `delta_pr_auc`/`verdict`; emphasize PR-AUC and balanced accuracy over raw accuracy given ~6.6% fail rate; note the small test positive count (~21) makes ROC-AUC noisy and PR-AUC the primary signal; explain the 0.5 threshold choice (§10.3) and the `pos_weight` rationale.
 - **Early-prediction mode:** what it does, the three timestep-weighting schemes (all sum-to-1), and that eval uses the final-timestep logit.
 - **Reproducibility/limitations:** `set_global_determinism` details and the cuDNN GRU determinism caveat.
@@ -839,11 +984,12 @@ Add a short "Experimental: GRU sequence model" subsection to `README.md` linking
 Torch is a required dependency. Do not add missing-torch skip logic or
 missing-torch test classes.
 
-Shared synthetic fixture (in `tests/conftest.py` or local): `make_synthetic(n_rows=40, n_sensors=6, n_pos=8, seed=0) -> tuple[np.ndarray, np.ndarray]` → `x` float32 `(40, 6)` with a constant column at index 0 (exercises std==0) and a signal column correlated with `y` int64 `(40,)`.
+Shared synthetic fixture (in `tests/conftest.py` or local): `make_synthetic(n_rows=40, n_sensors=8, n_pos=8, seed=0) -> tuple[np.ndarray, np.ndarray]` → `x` float32 `(40, 8)` with one high-missing column, one constant/low-variance column, one highly correlated duplicate, some ordinary `NaN` values for median imputation, and a signal column correlated with `y` int64 `(40,)`.
 
 `test_sequence_models.py`:
 - **TestForwardShapes:** standard `x=(4,6)`, `sensor_ids=(4,6)` → `(4,)` float32; early → `(4,6)`; shorter current window `x=(4,3)`, `sensor_ids=(4,3)` → `(4,)`; wrong ndim / mismatched shapes / empty window / out-of-range sensor ID → `ValueError`.
-- **TestSequenceSensorPipeline:** constant column → scale 1.0, transformed column all zeros, no NaN/inf; full-row transform returns values and tiled IDs; window transform over a subset returns expected sensor IDs and uses saved train stats; unknown window sensor / column-count mismatch → `ValueError`; **no-leakage:** fit on a train slice, mutate val rows, transform val — mean/scale unchanged and equal train stats.
+- **TestRawSensorCleaner:** high-missing, low-variance, and high-correlation sensors are dropped with the same strict threshold semantics as `yield_risk.preprocess`; retained `NaN` values are median-imputed from the train fit only; full-row transform returns finite retained values in `sensor_cols` order; raw window transform ignores dropped sensors, returns retained values plus retained names in caller window order; unknown raw window sensor / column-count mismatch / all-dropped window / infinite value → `ValueError`; **no-leakage:** fit on a train slice, mutate val rows, transform val — drop lists and medians stay equal to train-only stats.
+- **TestSequenceSensorPipeline:** `fit` composes `RawSensorCleaner` plus train-only scaler stats; full-row transform returns normalized retained values and tiled IDs; raw window transform returns normalized retained values and expected retained sensor IDs; `to_dict`/`from_dict` round-trip the nested cleaner and scaler stats; no-leakage check confirms cleaner metadata, mean, and scale stay train-only.
 - **TestPosWeight:** `n_neg=32, n_pos=8` → `4.0`; 0-pos / 0-neg / empty → `ValueError`.
 - **TestTimestepWeights:** `none` all `1/W` sum 1; `linear` strictly increasing, `w[-1] > w[0]`, sum ≈ 1; `sqrt` increasing, sum ≈ 1; unknown scheme → `ValueError`; `window_size < 1` → `ValueError`.
 - **TestEarlyPredictionLoss:** target = label broadcast to `(B,W)`; switching `none`→`linear` on fixed logits/targets changes the loss; `none` equals torch mean-reduction within `1e-6`.
@@ -851,9 +997,9 @@ Shared synthetic fixture (in `tests/conftest.py` or local): `make_synthetic(n_ro
 
 `test_sequence_train.py`:
 - **TestLoadConfig:** missing file → defaults; valid YAML overlays values including `window_sizes`; unknown key → `ValueError`; bad `timestep_weighting` or malformed `window_sizes` → `ValueError`; CLI-override merge via `dataclasses.replace` produces expected `TrainConfig`.
-- **TestPrepareData:** synthetic CSVs in tmp dir → correct window block shapes, train/test sensor-col match enforced, leakage rule (preprocessor fit only on train sub-split); `window_sizes=None` produces one full-row block; `window_sizes=(2,4)` produces two fixed-width prefix blocks; missing CSV → `FileNotFoundError`; mismatched sensor cols → `ValueError`; empty sensor set → `ValueError`.
-- **TestCheckpointRoundTrip:** train 1 epoch on synthetic, save, load → loaded `predict_logits(x, sensor_ids)` equals pre-save bit-for-bit (`torch.equal`) for both modes; ckpt dict has every §6.1 key with correct types and `preprocessor.sensor_cols`/`mean`/`scale` lengths == n_sensors; loaded preprocessor can normalize a shorter current window; missing-key → `KeyError`; bad `format_version` → `ValueError`; missing file → `FileNotFoundError`.
-- **TestEvaluate / TestSensorMismatch:** `evaluate` with an unknown `window_sensor_cols` entry → `ValueError`; standard full-row end-to-end and shorter current-window end-to-end both produce `SequenceMetrics`.
+- **TestPrepareData:** synthetic raw SECOM-like files in tmp dir → correct raw train/test split, retained window block shapes, leakage rule (drop lists, medians, scaler fit only on train sub-split); `window_sizes=None` produces one full-row retained block; `window_sizes=(2,4)` produces two fixed-width retained prefix blocks; missing raw file → `FileNotFoundError`; empty raw sensor set → `ValueError`; thresholds that drop every sensor → `ValueError`.
+- **TestCheckpointRoundTrip:** train 1 epoch on synthetic, save, load → loaded `predict_logits(x, sensor_ids)` equals pre-save bit-for-bit (`torch.equal`) for both modes; ckpt dict has every §6.1 key with correct types and nested preprocessor metadata for `cleaner.raw_sensor_cols`, `cleaner.sensor_cols`, drop lists, `cleaner.medians`, `mean`, and `scale` with lengths consistent with n_raw_sensors/n_sensors; loaded preprocessor can clean/impute/normalize a shorter raw current window; missing-key → `KeyError`; bad `format_version` → `ValueError`; missing file → `FileNotFoundError`.
+- **TestEvaluate / TestSensorMismatch:** `evaluate` with an unknown raw `window_sensor_cols` entry → `ValueError`; standard full-raw-row end-to-end and shorter raw current-window end-to-end both produce `SequenceMetrics`; a window containing only dropped sensors raises `ValueError`.
 - **TestResolveDevice:** `cpu`→`cpu`; `auto`→cpu when no CUDA; `cuda` without CUDA → `ValueError`.
 - **TestBaselineComparison:** valid `model_comparison.json` with a selected row → populated `TabularBaseline` (source `model_comparison.json`), comparison JSON has numeric `delta_pr_auc` + allowed verdict; comparison absent but valid `model_metadata.json` present → fallback `TabularBaseline` (source `model_metadata.json`); both absent → `None`, `verdict: "no_baseline"`; malformed JSON → `None`, no exception.
 - **TestSmoke:** end-to-end on synthetic arrays (no files): `train` 2 epochs (standard and early), `save_checkpoint`, `load_checkpoint`, `evaluate`, `compute_sequence_metrics`, `write_baseline_comparison` (no baseline) — completes, metrics finite-or-nan-guarded.
@@ -872,15 +1018,17 @@ Shared synthetic fixture (in `tests/conftest.py` or local): `make_synthetic(n_ro
 3. **Default model size:** `emb_dim=16`, `hidden_size=64`, `epochs=30`, `batch_size=32` (§10.0 / §4.1).
 4. **Torch dependency:** torch is required for this experiment; no optional
    import guard or custom missing-torch path (§1).
-5. **Current-window support:** model inputs are normalized values plus sensor
-   IDs for the current window; full rows are only one supported case (§2, §4).
+5. **Current-window support:** external inputs are raw sensor values plus raw
+   sensor names for the current window; the checkpointed preprocessor converts
+   them to normalized retained values plus sensor IDs for the GRU. Full rows
+   are only one supported case (§2, §4).
 6. **Preprocessing reuse:** sequence inference reloads the training-fitted
    preprocessing pipeline from the checkpoint and never re-fits on eval/current
    data (§3, §10.3).
 
 **Assumptions (brief genuinely ambiguous; resolved on the merits):**
 1. Threshold = 0.5 for thresholded metrics (§10.3); `pos_weight` decorrelates GRU logits from the tabular cost matrix; AUC comparison is threshold-free.
-2. Sequence preprocessing fit AFTER val carve-out, train sub-split only (§3.1, §10.1) — strictest no-leakage reading of "fit on TRAIN only."
+2. Sequence raw preprocessing fit AFTER val carve-out, train sub-split only (§3.1, §10.1) — strictest no-leakage reading of "fit on TRAIN only."
 3. Baseline = `selected==True` row of `model_comparison.json`, fallback `model_metadata.json` (§12).
 4. Optimizer = Adam, lr default 1e-3 (not specified by brief).
 5. Value-first feature order `[normalized_value, sensor_id_embedding]` (§4.3), per brief wording.
