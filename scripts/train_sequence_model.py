@@ -169,6 +169,18 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _fmt(value: float) -> str:
+    """Format a possibly-``nan`` metric to 4 decimals.
+
+    Args:
+        value: A metric value (``nan`` when validation was skipped).
+
+    Returns:
+        ``"nan"`` if ``value`` is ``nan``, else the value to 4 decimal places.
+    """
+    return "nan" if value != value else f"{value:.4f}"
+
+
 def _apply_overrides(
     config: TrainConfig, args: argparse.Namespace
 ) -> TrainConfig:
@@ -274,14 +286,11 @@ def main() -> None:
 
         if history:
             last = history[-1]
-            train_loss = last["train_loss"]
-            val_loss = last["val_loss"]
-            val_pr_auc = last["val_pr_auc"]
             print(
                 f"Final epoch {int(last['epoch'])}: "
-                f"train_loss={train_loss:.4f}  "
-                f"val_loss={val_loss if val_loss == val_loss else 'nan'}  "
-                f"val_pr_auc={val_pr_auc if val_pr_auc == val_pr_auc else 'nan'}"
+                f"train_loss={_fmt(last['train_loss'])}  "
+                f"val_loss={_fmt(last['val_loss'])}  "
+                f"val_pr_auc={_fmt(last['val_pr_auc'])}"
             )
         else:
             print("No training epochs ran (epochs=0).")

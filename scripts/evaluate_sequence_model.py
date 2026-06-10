@@ -27,6 +27,7 @@ from yield_risk.sequence_train import (
     LoadedCheckpoint,
     SequenceMetrics,
     _stratified_split,
+    compute_verdict,
     evaluate,
     load_checkpoint,
     load_tabular_baseline,
@@ -368,27 +369,7 @@ def main() -> None:
         print()
         print(format_report(cls_metrics, model_name="GRU Sequence Model"))
         print(f"Balanced Acc: {metrics.balanced_accuracy:.3f}")
-        if baseline is not None:
-            verdict = (
-                "sequence_better"
-                if (
-                    not math.isnan(metrics.pr_auc)
-                    and baseline.test_pr_auc is not None
-                    and metrics.pr_auc > baseline.test_pr_auc + 1e-6
-                )
-                else (
-                    "baseline_better"
-                    if (
-                        not math.isnan(metrics.pr_auc)
-                        and baseline.test_pr_auc is not None
-                        and baseline.test_pr_auc > metrics.pr_auc + 1e-6
-                    )
-                    else "tie" if not math.isnan(metrics.pr_auc) else "no_baseline"
-                )
-            )
-            print(f"Verdict: {verdict}")
-        else:
-            print("Verdict: no_baseline")
+        print(f"Verdict: {compute_verdict(metrics, baseline)}")
 
     except (FileNotFoundError, ValueError, KeyError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

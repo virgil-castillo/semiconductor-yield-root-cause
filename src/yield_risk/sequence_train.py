@@ -38,6 +38,7 @@ from yield_risk.sequence_models import (
     SecomGRU,
     SecomSequenceDataset,
     SequenceSensorPipeline,
+    _as_str_list,
     build_gru,
     build_timestep_weights,
     compute_pos_weight,
@@ -47,18 +48,6 @@ from yield_risk.sequence_models import (
 from yield_risk.validation import validate_secom
 
 _VALID_WEIGHTING = {"none", "linear", "sqrt"}
-
-
-def _as_str_list(value: object) -> list[str]:
-    """Coerce a stored sequence into a list of strings.
-
-    Args:
-        value: A list-like object of names.
-
-    Returns:
-        A list of strings.
-    """
-    return [str(v) for v in value]  # type: ignore[attr-defined]
 
 
 # --------------------------------------------------------------------------- #
@@ -496,6 +485,27 @@ def set_global_determinism(seed: int) -> None:
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 
+def _block_weights(
+    block: WindowArrays, config: TrainConfig, device: str
+) -> Tensor | None:
+    """Build the sum-to-1 timestep weights for one window block (early mode only).
+
+    Args:
+        block: The window block whose fixed width sets the weight length.
+        config: Hyperparameters (mode and weighting scheme).
+        device: Compute device for the returned tensor.
+
+    Returns:
+        A ``(W,)`` float32 weights tensor in early mode, or ``None`` in standard
+        mode (where timestep weighting does not apply).
+    """
+    if not config.early_prediction:
+        return None
+    return build_timestep_weights(
+        block.x.shape[1], config.timestep_weighting, device
+    )
+
+
 def _block_loss(
     model: SecomGRU,
     x: Tensor,
@@ -503,8 +513,7 @@ def _block_loss(
     y: Tensor,
     pos_weight_tensor: Tensor,
     early_prediction: bool,
-    timestep_weighting: str,
-    device: str,
+    timestep_weights: Tensor | None,
 ) -> Tensor:
     """Compute the per-batch loss for either mode (§7).
 
@@ -515,8 +524,8 @@ def _block_loss(
         y: Float labels, shape ``(B,)``.
         pos_weight_tensor: ``pos_weight`` tensor, shape ``(1,)``.
         early_prediction: Whether to use early-mode loss.
-        timestep_weighting: Early-mode weighting scheme.
-        device: Compute device.
+        timestep_weights: Precomputed sum-to-1 timestep weights, shape ``(W,)``;
+            required in early mode, ignored in standard mode.
 
     Returns:
         A scalar loss tensor.
@@ -526,14 +535,15 @@ def _block_loss(
         return F.binary_cross_entropy_with_logits(
             logits, y, pos_weight=pos_weight_tensor
         )
+    if timestep_weights is None:
+        raise ValueError("timestep_weights are required in early-prediction mode")
     logits = model(x, sensor_ids)
     window = logits.shape[1]
     targets = y.unsqueeze(1).expand(logits.shape[0], window)
     elem = F.binary_cross_entropy_with_logits(
         logits, targets, pos_weight=pos_weight_tensor, reduction="none"
     )
-    weights = build_timestep_weights(window, timestep_weighting, device)
-    per_sample = (elem * weights.unsqueeze(0)).sum(dim=1)
+    per_sample = (elem * timestep_weights.unsqueeze(0)).sum(dim=1)
     return per_sample.mean()
 
 
@@ -582,13 +592,21 @@ def train(
         )
         for block_idx, block in enumerate(data.train_windows)
     ]
+    # Timestep weights depend only on the (fixed) window width of each block, so
+    # build them once per block rather than rebuilding inside the batch loop.
+    train_weights = [
+        _block_weights(block, config, device) for block in data.train_windows
+    ]
+
+    if not data.val_windows:
+        print("val split empty; skipping validation", file=sys.stderr)
 
     history: list[dict[str, float]] = []
     for epoch in range(config.epochs):
         model.train()
         total_loss = 0.0
         n_batches = 0
-        for loader in train_loaders:
+        for loader, weights in zip(train_loaders, train_weights, strict=True):
             for x, sensor_ids, y in loader:
                 x = x.to(device)
                 sensor_ids = sensor_ids.to(device)
@@ -601,8 +619,7 @@ def train(
                     y,
                     pos_weight_tensor,
                     config.early_prediction,
-                    config.timestep_weighting,
-                    device,
+                    weights,
                 )
                 loss.backward()  # type: ignore[no-untyped-call]
                 optimizer.step()
@@ -655,6 +672,7 @@ def _evaluate_val(
     labels: list[np.ndarray] = []
     with torch.no_grad():
         for block in data.val_windows:
+            weights = _block_weights(block, config, device)
             loader = make_loader(
                 SecomSequenceDataset(block.x, block.sensor_ids, block.y),
                 batch_size=config.batch_size,
@@ -673,8 +691,7 @@ def _evaluate_val(
                     y,
                     pos_weight_tensor,
                     config.early_prediction,
-                    config.timestep_weighting,
-                    device,
+                    weights,
                 )
                 total_loss += float(loss.detach())
                 n_batches += 1
@@ -1223,6 +1240,32 @@ def _delta(seq: float, base: float | None) -> float | None:
     return seq - base
 
 
+def compute_verdict(
+    seq_metrics: SequenceMetrics, baseline: TabularBaseline | None
+) -> str:
+    """Return the PR-AUC comparison verdict (§12).
+
+    Single source of truth for the verdict so the written artifact and any
+    printed summary cannot diverge.
+
+    Args:
+        seq_metrics: Computed sequence metrics.
+        baseline: Loaded tabular baseline, or ``None``.
+
+    Returns:
+        One of ``"sequence_better"``, ``"baseline_better"``, ``"tie"``, or
+        ``"no_baseline"``.
+    """
+    if baseline is None or math.isnan(seq_metrics.pr_auc):
+        return "no_baseline"
+    delta_pr = _delta(seq_metrics.pr_auc, baseline.test_pr_auc)
+    if delta_pr is None:
+        return "no_baseline"
+    if abs(delta_pr) < 1e-6:
+        return "tie"
+    return "sequence_better" if delta_pr > 0 else "baseline_better"
+
+
 def write_baseline_comparison(
     seq_metrics: SequenceMetrics,
     baseline: TabularBaseline | None,
@@ -1239,17 +1282,7 @@ def write_baseline_comparison(
     delta_roc = _delta(
         seq_metrics.roc_auc, baseline.test_roc_auc if baseline else None
     )
-
-    if baseline is None or math.isnan(seq_metrics.pr_auc):
-        verdict = "no_baseline"
-    elif delta_pr is None:
-        verdict = "no_baseline"
-    elif abs(delta_pr) < 1e-6:
-        verdict = "tie"
-    elif delta_pr > 0:
-        verdict = "sequence_better"
-    else:
-        verdict = "baseline_better"
+    verdict = compute_verdict(seq_metrics, baseline)
 
     sequence_block = {
         "pr_auc": _json_safe(seq_metrics.pr_auc),
