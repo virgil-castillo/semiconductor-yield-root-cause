@@ -604,3 +604,16 @@ by 4/5 sensors, and the top-ten overlap is 7/10
   tools and chambers to produce actionable engineering recommendations.
 - **Real-time SPC integration** — feed model risk scores into existing SPC
   dashboards so operators see early-warning flags alongside traditional control charts.
+
+---
+
+## Experimental: GRU sequence model
+
+An isolated PyTorch GRU experiment is included alongside the tabular pipeline.
+It treats the ordered SECOM sensor measurements as a pseudo-sequence with learned
+per-sensor embeddings and is intended as a hypothesis test of positional structure,
+not a production model. Training, evaluation, and current-window scoring are fully
+self-contained and do not affect any tabular artifacts.
+
+See [`docs/sequence_model.md`](docs/sequence_model.md) for setup, usage, and
+guidance on interpreting the results.
