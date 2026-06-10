@@ -24,6 +24,7 @@ dependencies = [
     "joblib>=1.4",
     "scipy>=1.13",
     "imbalanced-learn>=0.12",
+    "torch>=2.2",
 ]
 
 [project.optional-dependencies]
@@ -90,6 +91,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "imblearn.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "torch.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
