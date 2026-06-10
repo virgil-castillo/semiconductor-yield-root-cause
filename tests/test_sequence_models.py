@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -331,3 +332,70 @@ class TestEarlyPredictionLoss:
             )
         )
         assert math.isclose(self._loss(elem, "none"), mean_red, abs_tol=1e-6)
+
+
+class TestMetrics:
+    """Sequence metric set, single-class guard, and JSON serialization."""
+
+    def test_two_class_metrics(self) -> None:
+        from yield_risk.sequence_train import compute_sequence_metrics
+
+        y_true = np.array([0, 0, 1, 1, 0, 1])
+        y_prob = np.array([0.1, 0.2, 0.9, 0.8, 0.3, 0.7])
+        m = compute_sequence_metrics(y_true, y_prob)
+        assert math.isfinite(m.roc_auc)
+        assert math.isfinite(m.pr_auc)
+        assert math.isfinite(m.balanced_accuracy)
+        assert len(m.confusion_matrix) == 2
+        assert len(m.confusion_matrix[0]) == 2
+
+    def test_single_class_guard(self) -> None:
+        from yield_risk.sequence_train import compute_sequence_metrics
+
+        y_true = np.zeros(5, dtype=np.int64)
+        y_prob = np.array([0.1, 0.2, 0.3, 0.4, 0.6])
+        with pytest.warns(UserWarning, match="single-class"):
+            m = compute_sequence_metrics(y_true, y_prob)
+        assert math.isnan(m.roc_auc)
+        assert math.isnan(m.pr_auc)
+        assert math.isfinite(m.precision)
+        assert math.isfinite(m.recall)
+        assert math.isfinite(m.f1)
+        assert math.isfinite(m.balanced_accuracy)
+        # 2x2 even when single-class (labels=[0, 1]).
+        assert len(m.confusion_matrix) == 2
+        assert len(m.confusion_matrix[0]) == 2
+
+    def test_json_nan_to_null(self, tmp_path: Path) -> None:
+        import json
+
+        from yield_risk.sequence_train import (
+            compute_sequence_metrics,
+            save_sequence_metrics,
+        )
+
+        y_true = np.zeros(4, dtype=np.int64)
+        y_prob = np.array([0.1, 0.2, 0.3, 0.4])
+        with pytest.warns(UserWarning, match="single-class"):
+            m = compute_sequence_metrics(y_true, y_prob)
+        out = tmp_path / "metrics.json"
+        save_sequence_metrics(m, out)
+        payload = json.loads(out.read_text())
+        assert payload["roc_auc"] is None
+        assert payload["pr_auc"] is None
+        assert payload["precision"] is not None
+
+    def test_classification_metrics_frozen(self) -> None:
+        import dataclasses
+
+        from yield_risk.evaluate import ClassificationMetrics
+
+        names = {f.name for f in dataclasses.fields(ClassificationMetrics)}
+        assert names == {
+            "roc_auc",
+            "pr_auc",
+            "precision",
+            "recall",
+            "f1",
+            "confusion_matrix",
+        }
