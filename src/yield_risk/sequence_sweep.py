@@ -23,6 +23,8 @@ import csv
 import dataclasses
 import json
 import math
+import subprocess
+import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -387,6 +389,95 @@ def write_sweep_results(ranked: list[TrialResult], reports_dir: Path) -> None:
                     _cell(r.error),
                 ]
             )
+
+
+def evaluate_winner(checkpoint_path: Path, device: str = "cpu") -> None:
+    """Invoke the evaluation script against the winning checkpoint.
+
+    Runs ``scripts/evaluate_sequence_model.py`` as a subprocess. If the
+    subprocess exits with a nonzero return code, a warning is printed to
+    stderr; no exception is raised so already-written sweep results are
+    preserved.
+
+    Args:
+        checkpoint_path: Path to the winning trial's checkpoint file.
+        device: Compute device string (``"cpu"``, ``"cuda"``, or ``"auto"``).
+
+    Returns:
+        None. Side-effect: runs the evaluation subprocess.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/evaluate_sequence_model.py",
+            "--checkpoint",
+            str(checkpoint_path),
+            "--device",
+            device,
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        print(
+            f"warning: evaluate_sequence_model.py exited with code "
+            f"{result.returncode} for checkpoint {checkpoint_path}",
+            file=sys.stderr,
+        )
+
+
+def run_sweep(
+    data: PreparedData,
+    specs: list[TrialSpec],
+    models_dir: Path,
+    reports_dir: Path,
+    device: str = "cpu",
+    evaluate_best: bool = True,
+) -> tuple[list[TrialResult], TrialResult | None]:
+    """Run all trials in the sweep, rank results, write outputs.
+
+    Iterates over every spec in order, running each trial and collecting
+    results. After all trials complete, ranks results, writes sweep output
+    files, and optionally invokes ``evaluate_winner`` on the best checkpoint.
+
+    Args:
+        data: Prepared leakage-free training data.
+        specs: Ordered list of trial specifications to run.
+        models_dir: Root directory for model checkpoints.
+        reports_dir: Root directory for reports and result files.
+        device: Compute device string.
+        evaluate_best: When ``True``, invoke ``evaluate_winner`` on the best
+            trial's checkpoint after writing sweep results.
+
+    Returns:
+        A tuple ``(ranked, best)`` where ``ranked`` is the list of
+        ``TrialResult`` objects sorted by the sweep selection rule, and
+        ``best`` is the top successful trial or ``None`` if all trials failed.
+    """
+    results: list[TrialResult] = []
+    for spec in specs:
+        result = run_trial(spec, data, models_dir, reports_dir, device)
+        print(
+            f"{result.trial_id}  {result.status}  val_pr_auc={result.val_pr_auc:.4f}"
+            if not math.isnan(result.val_pr_auc)
+            else f"{result.trial_id}  {result.status}  val_pr_auc=nan"
+        )
+        results.append(result)
+
+    ranked = rank_trials(results)
+    write_sweep_results(ranked, reports_dir)
+
+    best = select_best(results)
+
+    if evaluate_best:
+        if best is None:
+            print(
+                "warning: no successful trial was produced; skipping evaluation.",
+                file=sys.stderr,
+            )
+        elif best.checkpoint_path is not None:
+            evaluate_winner(Path(best.checkpoint_path), device)
+
+    return ranked, best
 
 
 def run_trial(

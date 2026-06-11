@@ -777,3 +777,232 @@ def test_write_sweep_results_creates_reports_dir_if_missing(tmp_path: Path) -> N
 
     assert (reports_dir / "sequence_sweep_results.json").exists()
     assert (reports_dir / "sequence_sweep_results.csv").exists()
+
+
+# ---------------------------------------------------------------------------
+# run_sweep: happy path (two specs, evaluate_best=True)
+# ---------------------------------------------------------------------------
+
+
+def test_run_sweep_happy_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run_sweep runs both trials, writes result files, calls evaluate_winner once."""
+    from yield_risk.sequence_sweep import run_sweep
+
+    eval_calls: list[tuple[Path, str]] = []
+
+    def _stub_evaluate_winner(checkpoint_path: Path, device: str = "cpu") -> None:
+        eval_calls.append((checkpoint_path, device))
+
+    monkeypatch.setattr(
+        "yield_risk.sequence_sweep.evaluate_winner", _stub_evaluate_winner
+    )
+
+    models_dir = tmp_path / "models"
+    reports_dir = tmp_path / "reports"
+
+    data = _make_two_class_prepared(tmp_path)
+
+    base_config = TrainConfig(
+        emb_dim=8,
+        hidden_size=16,
+        num_layers=1,
+        dropout=0.0,
+        lr=0.001,
+        batch_size=32,
+        epochs=1,
+        seed=0,
+        device="cpu",
+        num_workers=0,
+    )
+    specs = [
+        TrialSpec(trial_id="trial_000", config=base_config),
+        TrialSpec(
+            trial_id="trial_001",
+            config=TrainConfig(
+                emb_dim=8,
+                hidden_size=16,
+                num_layers=1,
+                dropout=0.0,
+                lr=0.001,
+                batch_size=32,
+                epochs=1,
+                seed=1,
+                device="cpu",
+                num_workers=0,
+            ),
+        ),
+    ]
+
+    ranked, best = run_sweep(
+        data, specs, models_dir, reports_dir, device="cpu", evaluate_best=True
+    )
+
+    # Both result files written
+    assert (reports_dir / "sequence_sweep_results.json").exists()
+    assert (reports_dir / "sequence_sweep_results.csv").exists()
+
+    # best is the top-ranked trial
+    assert best is not None
+    assert best.trial_id == ranked[0].trial_id
+
+    # evaluate_winner called exactly once with best checkpoint
+    assert len(eval_calls) == 1
+    assert best.checkpoint_path is not None
+    assert eval_calls[0][0] == Path(best.checkpoint_path)
+
+
+# ---------------------------------------------------------------------------
+# run_sweep: evaluate_best=False — stub NOT called
+# ---------------------------------------------------------------------------
+
+
+def test_run_sweep_evaluate_best_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run_sweep with evaluate_best=False never calls evaluate_winner."""
+    from yield_risk.sequence_sweep import run_sweep
+
+    eval_calls: list[object] = []
+
+    def _stub_evaluate_winner(checkpoint_path: Path, device: str = "cpu") -> None:
+        eval_calls.append(checkpoint_path)
+
+    monkeypatch.setattr(
+        "yield_risk.sequence_sweep.evaluate_winner", _stub_evaluate_winner
+    )
+
+    data = _make_two_class_prepared(tmp_path)
+    base_config = TrainConfig(
+        emb_dim=8,
+        hidden_size=16,
+        num_layers=1,
+        dropout=0.0,
+        lr=0.001,
+        batch_size=32,
+        epochs=1,
+        seed=0,
+        device="cpu",
+        num_workers=0,
+    )
+    specs = [TrialSpec(trial_id="trial_000", config=base_config)]
+
+    run_sweep(
+        data,
+        specs,
+        tmp_path / "models",
+        tmp_path / "reports",
+        device="cpu",
+        evaluate_best=False,
+    )
+
+    assert len(eval_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# run_sweep: all failed — best is None, files written, stub NOT called
+# ---------------------------------------------------------------------------
+
+
+def test_run_sweep_all_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run_sweep with all failed trials: best=None, files written, no evaluation."""
+    import math
+
+    from yield_risk.sequence_sweep import TrialResult, run_sweep
+
+    eval_calls: list[object] = []
+
+    def _stub_evaluate_winner(checkpoint_path: Path, device: str = "cpu") -> None:
+        eval_calls.append(checkpoint_path)
+
+    monkeypatch.setattr(
+        "yield_risk.sequence_sweep.evaluate_winner", _stub_evaluate_winner
+    )
+
+    def _fake_run_trial(
+        spec: TrialSpec,
+        data: object,
+        models_dir: Path,
+        reports_dir: Path,
+        device: str = "cpu",
+    ) -> TrialResult:
+        return TrialResult(
+            trial_id=spec.trial_id,
+            emb_dim=8,
+            hidden_size=16,
+            num_layers=1,
+            dropout=0.0,
+            lr=0.001,
+            batch_size=32,
+            val_loss=math.nan,
+            val_pr_auc=math.nan,
+            val_roc_auc=None,
+            n_params=None,
+            checkpoint_path=None,
+            status="failed",
+            error="synthetic failure",
+        )
+
+    monkeypatch.setattr("yield_risk.sequence_sweep.run_trial", _fake_run_trial)
+
+    data = _make_two_class_prepared(tmp_path)
+    base_config = TrainConfig(
+        emb_dim=8,
+        hidden_size=16,
+        num_layers=1,
+        dropout=0.0,
+        lr=0.001,
+        batch_size=32,
+        epochs=1,
+        seed=0,
+        device="cpu",
+        num_workers=0,
+    )
+    specs = [TrialSpec(trial_id="trial_000", config=base_config)]
+
+    ranked, best = run_sweep(
+        data,
+        specs,
+        tmp_path / "models",
+        tmp_path / "reports",
+        device="cpu",
+        evaluate_best=True,
+    )
+
+    assert best is None
+    assert (tmp_path / "reports" / "sequence_sweep_results.json").exists()
+    assert (tmp_path / "reports" / "sequence_sweep_results.csv").exists()
+    assert len(eval_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# CLI smoke test
+# ---------------------------------------------------------------------------
+
+
+def test_run_sequence_sweep_cli_parser() -> None:
+    """run_sequence_sweep._build_parser parses defaults and optional flags."""
+    import run_sequence_sweep  # type: ignore[import]
+
+    parser = run_sequence_sweep._build_parser()
+
+    # Defaults
+    args = parser.parse_args([])
+    assert args.config == Path("configs/sequence_config.yaml")
+    assert args.epochs is None
+    assert args.device is None
+    assert args.no_eval is False
+
+    # Optional flags accepted
+    args2 = parser.parse_args(
+        ["--no-eval", "--epochs", "2", "--device", "cpu"]
+    )
+    assert args2.no_eval is True
+    assert args2.epochs == 2
+    assert args2.device == "cpu"
+
+    # main() is callable
+    assert callable(run_sequence_sweep.main)
