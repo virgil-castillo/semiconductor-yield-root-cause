@@ -596,6 +596,27 @@ class TestBaselineComparison:
         assert baseline is None
 
 
+class TestTrainingProgress:
+    """Console progress emitted during training."""
+
+    def test_prints_one_based_epoch_metrics(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        data = _prepared_from_synthetic()
+        config = TrainConfig(
+            emb_dim=4, hidden_size=8, epochs=2, batch_size=16, window_sizes=None
+        )
+        _, history = train(data, config)
+
+        out = capsys.readouterr().out
+        assert "Epoch 1/2: train_loss=" in out
+        assert "Epoch 2/2: train_loss=" in out
+        assert "val_loss=" in out
+        assert "val_pr_auc=" in out
+        assert history[0]["epoch"] == 1.0
+        assert history[1]["epoch"] == 2.0
+
+
 class TestSmoke:
     """End-to-end smoke on synthetic arrays."""
 

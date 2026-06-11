@@ -494,6 +494,11 @@ def _block_loss(
     return F.binary_cross_entropy_with_logits(logits, y, pos_weight=pos_weight_tensor)
 
 
+def _fmt_metric(value: float) -> str:
+    """Format a possibly-``nan`` metric for console progress output."""
+    return "nan" if value != value else f"{value:.4f}"
+
+
 def train(
     data: PreparedData, config: TrainConfig
 ) -> tuple[SecomGRU, list[dict[str, float]]]:
@@ -568,13 +573,20 @@ def train(
         val_loss, val_pr_auc = _evaluate_val(
             model, data, config, pos_weight_tensor, device
         )
+        epoch_num = epoch + 1
         history.append(
             {
-                "epoch": float(epoch),
+                "epoch": float(epoch_num),
                 "train_loss": train_loss,
                 "val_loss": val_loss,
                 "val_pr_auc": val_pr_auc,
             }
+        )
+        print(
+            f"Epoch {epoch_num}/{config.epochs}: "
+            f"train_loss={_fmt_metric(train_loss)}  "
+            f"val_loss={_fmt_metric(val_loss)}  "
+            f"val_pr_auc={_fmt_metric(val_pr_auc)}"
         )
 
     model.eval()
