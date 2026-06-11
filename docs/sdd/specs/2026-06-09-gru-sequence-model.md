@@ -308,7 +308,6 @@ def build_gru(
     hidden_size: int = 64,
     num_layers: int = 1,
     dropout: float = 0.0,
-    early_prediction: bool = False,
 ) -> SecomGRU:
     """Construct a SecomGRU after validating hyperparameters.
 
@@ -330,8 +329,7 @@ def build_gru(
 
 - `self.embedding = nn.Embedding(num_embeddings=n_sensors, embedding_dim=emb_dim)`.
 - `self.gru = nn.GRU(input_size=1 + emb_dim, hidden_size=hidden_size, num_layers=num_layers, batch_first=True, dropout=(dropout if num_layers > 1 else 0.0))`.
-- `self.head = nn.Linear(hidden_size, 1)` (shared across timesteps in early mode).
-- `self.early_prediction = early_prediction`.
+- `self.head = nn.Linear(hidden_size, 1)`.
 - Store `self.n_sensors, self.emb_dim, self.hidden_size, self.num_layers, self.dropout` as plain attributes for checkpointing.
 
 ### 4.3 `forward` — exact shape walk
@@ -347,8 +345,7 @@ def forward(self, x: Tensor, sensor_ids: Tensor) -> Tensor:
             (B, W), int64, on the model's device.
 
     Returns:
-        early_prediction=False: logits shape (B,), float32 (final-timestep).
-        early_prediction=True: logits shape (B, W), float32.
+        logits shape (B,), float32 (final-window).
 
     Raises:
         ValueError: If x/sensor_ids are not aligned 2-D tensors, if the
@@ -362,18 +359,13 @@ def forward(self, x: Tensor, sensor_ids: Tensor) -> Tensor:
 3. `emb = self.embedding(sensor_ids)` → `(B, W, emb_dim)` float32.
 4. `feats = torch.cat([vals, emb], dim=-1)` → `(B, W, 1 + emb_dim)` float32. (Value first, then embedding — matches brief's `[normalized_value, sensor_id_embedding]`.)
 5. `out, _ = self.gru(feats)` → `out`: `(B, W, hidden_size)` float32.
-6. **Standard:** `last = out[:, -1, :]` → `(B, hidden_size)`; `logit = self.head(last)` → `(B, 1)`; `return logit.squeeze(-1)` → `(B,)`.
-7. **Early:** `logits_seq = self.head(out)` → `(B, W, 1)`; `return logits_seq.squeeze(-1)` → `(B, W)`.
+6. `last = out[:, -1, :]` -> `(B, hidden_size)`; `logit = self.head(last)` -> `(B, 1)`; `return logit.squeeze(-1)` -> `(B,)`.
 
 ### 4.4 Mode-unifying prediction helper
 
 ```python
 def predict_logits(model: SecomGRU, x: Tensor, sensor_ids: Tensor) -> Tensor:
-    """Return one logit per wafer regardless of mode, shape (B,), float32.
-
-    Standard mode: forward(x, sensor_ids). Early mode:
-    forward(x, sensor_ids)[:, -1] (current-window final timestep).
-    """
+    """Return one logit per wafer, shape (B,), float32."""
 ```
 `y_prob = torch.sigmoid(logit)` is computed by the caller (eval loop), never inside the model.
 
@@ -423,8 +415,6 @@ Flat keys are simpler to validate key-by-key and compare in tests. Saved via `to
 | `hidden_size` | `int` | |
 | `num_layers` | `int` | |
 | `dropout` | `float` | user-requested value |
-| `early_prediction` | `bool` | |
-| `timestep_weighting` | `str` | `"none"`/`"linear"`/`"sqrt"`; stored even when `early_prediction=False` (ignored on load then) |
 | `preprocessor` | `dict[str, object]` | `SequenceSensorPipeline.to_dict()` with raw schema, retained schema, drop lists, medians, scaler stats, thresholds |
 | `sensor_cols` | `list[str]` | ordered retained fit-time model sensor names |
 | `pos_weight` | `float` | train-only n_neg/n_pos |
@@ -442,8 +432,8 @@ Flat keys are simpler to validate key-by-key and compare in tests. Saved via `to
 ```python
 def save_checkpoint(path: Path, model: SecomGRU, preprocessor: SequenceSensorPipeline,
                     sensor_cols: list[str], pos_weight: float,
-                    timestep_weighting: str, random_seed: int, epochs: int,
-                    lr: float, batch_size: int, device: str) -> None:
+                    random_seed: int, epochs: int, lr: float,
+                    batch_size: int, device: str) -> None:
     """Serialize model + preprocessing pipeline for leakage-free eval.
 
     Raises:
@@ -458,8 +448,6 @@ class LoadedCheckpoint:
     preprocessor: SequenceSensorPipeline
     sensor_cols: list[str]
     pos_weight: float
-    early_prediction: bool
-    timestep_weighting: str
     raw: dict[str, object]
 
 def load_checkpoint(path: Path, device: str = "cpu") -> LoadedCheckpoint:
@@ -480,38 +468,13 @@ def load_checkpoint(path: Path, device: str = "cpu") -> LoadedCheckpoint:
 
 ---
 
-## 7. Loss math — timestep weights normalized to **sum 1**, schemes `{none, linear, sqrt}`
+## 7. Loss math - final-window binary cross-entropy
 
-Sum-to-1 keeps the loss scale identical across weighting schemes and identical to the unweighted mean baseline, so loss values are directly comparable across runs.
+Training uses one wafer-level logit after the available sensor window has been read:
 
-### 7.1 Standard mode
-- `criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)`.
-- `logits = model(x, sensor_ids)` → `(B,)`; `loss = criterion(logits, y)` (`y` `(B,)` float32), default `"mean"` reduction → scalar.
-
-### 7.2 Early-prediction mode
-- `logits = model(x, sensor_ids)` → `(B, W)`.
-- `targets = y.unsqueeze(1).expand(B, W)` → `(B, W)` float32 (wafer label repeated across window timesteps).
-- `elem = F.binary_cross_entropy_with_logits(logits, targets, pos_weight=pos_weight_tensor, reduction="none")` → `(B, W)`. `pos_weight` shape `(1,)` broadcasts over the last dim.
-- `w = build_timestep_weights(W, scheme, device)` → `(W,)` float32, `w.sum() == 1`.
-- `per_sample = (elem * w.unsqueeze(0)).sum(dim=1)` → `(B,)`; `loss = per_sample.mean()` → scalar.
-- With `"none"`, this equals `F.binary_cross_entropy_with_logits(logits, targets, pos_weight=pos_weight_tensor, reduction="mean")` within `1e-6`.
-
-```python
-def build_timestep_weights(window_size: int, scheme: str, device: str) -> Tensor:
-    """Return timestep weights, shape (window_size,), float32, sum == 1.
-
-    Schemes:
-        "none": w_t = 1 / W (uniform).
-        "linear": raw_t = (t + 1); w = raw / raw.sum(). Strictly increasing.
-        "sqrt": raw_t = sqrt(t + 1); w = raw / raw.sum(). Gentler increase.
-
-    Raises:
-        ValueError: If window_size < 1, or scheme not in {none, linear, sqrt}.
-    """
-```
-- `ValueError("window_size must be >= 1")` if `window_size < 1`; `ValueError(f"Unknown timestep_weighting scheme: {scheme}")` otherwise.
-- `timestep_weighting` is ignored in standard mode (still persisted for record-keeping).
-
+- `logits = predict_logits(model, x, sensor_ids)` -> `(B,)`.
+- `loss = F.binary_cross_entropy_with_logits(logits, y, pos_weight=pos_weight_tensor)` where `y` is `(B,)` float32 and the default reduction is `"mean"`.
+- Full rows and shorter current windows use the same objective; there is no per-prefix supervision.
 ---
 
 ## 8. Edge cases — exact behavior
@@ -522,7 +485,7 @@ def build_timestep_weights(window_size: int, scheme: str, device: str) -> Tensor
 | `NaN` values in raw sensor matrix | Allowed; retained sensors are imputed with train-sub-split medians saved in `SequenceSensorPipeline`. |
 | Infinite values in raw sensor matrix | `SequenceSensorPipeline.fit`/`transform_*` raises `ValueError("Sensor matrix contains infinite values")`. |
 | `n_sensors == 0` after preprocessing | `prepare_data`/`SequenceSensorPipeline.fit` raises `ValueError("No sensor columns remain after preprocessing")`; `build_gru` also raises `ValueError`. CLI → `exit(1)`. |
-| `n_sensors == 1` | Allowed; full row and any valid window have `W=1`; early-mode final timestep == only timestep. |
+| `n_sensors == 1` | Allowed; full row and any valid window have `W=1`. |
 | `window_size == 0` | Dataset/model/preprocessor raise `ValueError("window_size must be >= 1")` or `ValueError("Window sensor columns must be non-empty")`. |
 | Unknown window sensor | `SequenceSensorPipeline.transform_window` raises `ValueError(f"Unknown window sensor column: {col}")`. |
 | Window contains only dropped sensors | `SequenceSensorPipeline.transform_window` raises `ValueError("Window contains no retained sensor columns after preprocessing")`. |
@@ -572,8 +535,6 @@ class TrainConfig:
     lr: float = 1e-3
     batch_size: int = 32
     epochs: int = 30
-    early_prediction: bool = False
-    timestep_weighting: str = "none"
     seed: int = 42
     device: str = "cpu"
     num_workers: int = 0
@@ -601,20 +562,20 @@ def load_sequence_config(
     Raises:
         ValueError: If the YAML contains keys not present on TrainConfig
             (message lists the unknown keys), or a value cannot be coerced to
-            its field type, or timestep_weighting is not in {none, linear, sqrt}.
+            its field type.
     """
 ```
 
 Behavior:
 - Missing file → `TrainConfig()` (all defaults).
-- Present → `yaml.safe_load`; unknown keys → `ValueError(f"Unknown sequence config keys: {sorted(unknown)}")`; type-coercion failure → `ValueError` naming the field; `timestep_weighting` validated against `{"none","linear","sqrt"}`; `window_sizes` must be null or a non-empty list/tuple of positive integers.
+- Present → `yaml.safe_load`; unknown keys → `ValueError(f"Unknown sequence config keys: {sorted(unknown)}")`; type-coercion failure → `ValueError` naming the field; `window_sizes` must be null or a non-empty list/tuple of positive integers.
 - A `device` value of `"cuda"`/`"auto"`/`"cpu"` is permitted in the file but the CLI `--device` flag (default unset) overrides it; final device is resolved by `resolve_device` (§10.2).
 
 **`configs/sequence_config.yaml` ships with the defaults written explicitly (as documentation):**
 
 ```yaml
 # Hyperparameters for the experimental GRU sequence model.
-# Override any value at the CLI, e.g. --epochs 50 --early-prediction.
+# Override any value at the CLI, e.g. --epochs 50.
 emb_dim: 16
 hidden_size: 64
 num_layers: 1
@@ -622,8 +583,6 @@ dropout: 0.0
 lr: 0.001
 batch_size: 32
 epochs: 30
-early_prediction: false
-timestep_weighting: none   # one of: none | linear | sqrt
 seed: 42
 device: cpu                # one of: cpu | cuda | auto
 num_workers: 0
@@ -640,7 +599,7 @@ Duplicates are removed, and at least one valid window size must remain.
 Inference is not limited to these sizes; it can score any current window whose
 sensor names exist in the fitted preprocessing pipeline.
 
-**CLI override semantics.** Both scripts parse overridable hyperparameters with `default=None`. After `load_sequence_config(args.config)`, each non-`None` CLI value replaces the corresponding field via `dataclasses.replace`. `--early-prediction` is a `store_true` whose presence sets `True`; its absence leaves the config value unchanged (argparse default `None` sentinel — do not use `BooleanOptionalAction`). `--window-sizes` parses a comma-separated list of positive integers into `tuple[int, ...]`.
+**CLI override semantics.** Both scripts parse overridable hyperparameters with `default=None`. After `load_sequence_config(args.config)`, each non-`None` CLI value replaces the corresponding field via `dataclasses.replace`. `--window-sizes` parses a comma-separated list of positive integers into `tuple[int, ...]`.
 
 ### 10.1 `prepare_data`
 
@@ -910,8 +869,6 @@ leakage-free train/test and train/val splits. Loads `TrainConfig` from
 | `--lr` | float | None→config | Adam learning rate |
 | `--batch-size` | int | None→config | batch size |
 | `--epochs` | int | None→config | training epochs |
-| `--early-prediction` | store_true | None→config | per-timestep mode |
-| `--timestep-weighting` | choice{none,linear,sqrt} | None→config | early-mode weighting |
 | `--seed` | int | None→config | global seed |
 | `--device` | choice{cpu,cuda,auto} | None→config | compute device |
 | `--val-size` | float | None→config | val carve-out fraction |
@@ -970,7 +927,7 @@ Create `docs/sequence_model.md`:
   `StandardScaler` statistics fitted on the train sub-split only. Inference
   never re-fits any preprocessing decision on eval/current data.
 - **Interpreting results:** read `sequence_model_comparison.json` `delta_pr_auc`/`verdict`; emphasize PR-AUC and balanced accuracy over raw accuracy given ~6.6% fail rate; note the small test positive count (~21) makes ROC-AUC noisy and PR-AUC the primary signal; explain the 0.5 threshold choice (§10.3) and the `pos_weight` rationale.
-- **Early-prediction mode:** what it does, the three timestep-weighting schemes (all sum-to-1), and that eval uses the final-timestep logit.
+- **Final-window objective:** training and evaluation use one wafer-level logit after the supplied window is read.
 - **Reproducibility/limitations:** `set_global_determinism` details and the cuDNN GRU determinism caveat.
 
 Add a short "Experimental: GRU sequence model" subsection to `README.md` linking to `docs/sequence_model.md`. Do not alter existing README content.
@@ -987,18 +944,16 @@ missing-torch test classes.
 Shared synthetic fixture (in `tests/conftest.py` or local): `make_synthetic(n_rows=40, n_sensors=8, n_pos=8, seed=0) -> tuple[np.ndarray, np.ndarray]` → `x` float32 `(40, 8)` with one high-missing column, one constant/low-variance column, one highly correlated duplicate, some ordinary `NaN` values for median imputation, and a signal column correlated with `y` int64 `(40,)`.
 
 `test_sequence_models.py`:
-- **TestForwardShapes:** standard `x=(4,6)`, `sensor_ids=(4,6)` → `(4,)` float32; early → `(4,6)`; shorter current window `x=(4,3)`, `sensor_ids=(4,3)` → `(4,)`; wrong ndim / mismatched shapes / empty window / out-of-range sensor ID → `ValueError`.
+- **TestForwardShapes:** standard `x=(4,6)`, `sensor_ids=(4,6)` → `(4,)` float32; shorter current window `x=(4,3)`, `sensor_ids=(4,3)` → `(4,)`; wrong ndim / mismatched shapes / empty window / out-of-range sensor ID → `ValueError`.
 - **TestRawSensorCleaner:** high-missing, low-variance, and high-correlation sensors are dropped with the same strict threshold semantics as `yield_risk.preprocess`; retained `NaN` values are median-imputed from the train fit only; full-row transform returns finite retained values in `sensor_cols` order; raw window transform ignores dropped sensors, returns retained values plus retained names in caller window order; unknown raw window sensor / column-count mismatch / all-dropped window / infinite value → `ValueError`; **no-leakage:** fit on a train slice, mutate val rows, transform val — drop lists and medians stay equal to train-only stats.
 - **TestSequenceSensorPipeline:** `fit` composes `RawSensorCleaner` plus train-only scaler stats; full-row transform returns normalized retained values and tiled IDs; raw window transform returns normalized retained values and expected retained sensor IDs; `to_dict`/`from_dict` round-trip the nested cleaner and scaler stats; no-leakage check confirms cleaner metadata, mean, and scale stay train-only.
 - **TestPosWeight:** `n_neg=32, n_pos=8` → `4.0`; 0-pos / 0-neg / empty → `ValueError`.
-- **TestTimestepWeights:** `none` all `1/W` sum 1; `linear` strictly increasing, `w[-1] > w[0]`, sum ≈ 1; `sqrt` increasing, sum ≈ 1; unknown scheme → `ValueError`; `window_size < 1` → `ValueError`.
-- **TestEarlyPredictionLoss:** target = label broadcast to `(B,W)`; switching `none`→`linear` on fixed logits/targets changes the loss; `none` equals torch mean-reduction within `1e-6`.
 - **TestMetrics:** two-class synthetic → finite AUCs, `balanced_accuracy` present, 2x2 confusion matrix; single-class `y_true` → AUCs `nan` (via `math.isnan`), no exception, 2x2 matrix (via `labels=[0,1]`), precision/recall/f1/balanced_accuracy finite; JSON serialization maps nan→null; `ClassificationMetrics` still has exactly its 6 fields (guards against accidental modification).
 
 `test_sequence_train.py`:
-- **TestLoadConfig:** missing file → defaults; valid YAML overlays values including `window_sizes`; unknown key → `ValueError`; bad `timestep_weighting` or malformed `window_sizes` → `ValueError`; CLI-override merge via `dataclasses.replace` produces expected `TrainConfig`.
+- **TestLoadConfig:** missing file → defaults; valid YAML overlays values including `window_sizes`; unknown key → `ValueError`; malformed `window_sizes` → `ValueError`; CLI-override merge via `dataclasses.replace` produces expected `TrainConfig`.
 - **TestPrepareData:** synthetic raw SECOM-like files in tmp dir → correct raw train/test split, retained window block shapes, leakage rule (drop lists, medians, scaler fit only on train sub-split); `window_sizes=None` produces one full-row retained block; `window_sizes=(2,4)` produces two fixed-width retained prefix blocks; missing raw file → `FileNotFoundError`; empty raw sensor set → `ValueError`; thresholds that drop every sensor → `ValueError`.
-- **TestCheckpointRoundTrip:** train 1 epoch on synthetic, save, load → loaded `predict_logits(x, sensor_ids)` equals pre-save bit-for-bit (`torch.equal`) for both modes; ckpt dict has every §6.1 key with correct types and nested preprocessor metadata for `cleaner.raw_sensor_cols`, `cleaner.sensor_cols`, drop lists, `cleaner.medians`, `mean`, and `scale` with lengths consistent with n_raw_sensors/n_sensors; loaded preprocessor can clean/impute/normalize a shorter raw current window; missing-key → `KeyError`; bad `format_version` → `ValueError`; missing file → `FileNotFoundError`.
+- **TestCheckpointRoundTrip:** train 1 epoch on synthetic, save, load → loaded `predict_logits(x, sensor_ids)` equals pre-save bit-for-bit (`torch.equal`); ckpt dict has every §6.1 key with correct types and nested preprocessor metadata for `cleaner.raw_sensor_cols`, `cleaner.sensor_cols`, drop lists, `cleaner.medians`, `mean`, and `scale` with lengths consistent with n_raw_sensors/n_sensors; loaded preprocessor can clean/impute/normalize a shorter raw current window; missing-key → `KeyError`; bad `format_version` → `ValueError`; missing file → `FileNotFoundError`.
 - **TestEvaluate / TestSensorMismatch:** `evaluate` with an unknown raw `window_sensor_cols` entry → `ValueError`; standard full-raw-row end-to-end and shorter raw current-window end-to-end both produce `SequenceMetrics`; a window containing only dropped sensors raises `ValueError`.
 - **TestResolveDevice:** `cpu`→`cpu`; `auto`→cpu when no CUDA; `cuda` without CUDA → `ValueError`.
 - **TestBaselineComparison:** valid `model_comparison.json` with a selected row → populated `TabularBaseline` (source `model_comparison.json`), comparison JSON has numeric `delta_pr_auc` + allowed verdict; comparison absent but valid `model_metadata.json` present → fallback `TabularBaseline` (source `model_metadata.json`); both absent → `None`, `verdict: "no_baseline"`; malformed JSON → `None`, no exception.

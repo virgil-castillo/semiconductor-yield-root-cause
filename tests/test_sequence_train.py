@@ -9,15 +9,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from torch.nn import functional as F
 
 from tests.conftest import make_synthetic
-from yield_risk.sequence_models import SequenceSensorPipeline, build_gru
+from yield_risk.sequence_models import SequenceSensorPipeline, build_gru, predict_logits
 from yield_risk.sequence_train import (
     LoadedCheckpoint,
     PreparedData,
     SequenceMetrics,
     TrainConfig,
     WindowArrays,
+    _block_loss,
     compute_sequence_metrics,
     evaluate,
     load_checkpoint,
@@ -141,14 +143,13 @@ class TestLoadConfig:
         p = tmp_path / "c.yaml"
         p.write_text(
             "emb_dim: 8\nhidden_size: 32\nepochs: 5\n"
-            "window_sizes: [2, 4]\ntimestep_weighting: linear\n"
+            "window_sizes: [2, 4]\n"
         )
         cfg = load_sequence_config(p)
         assert cfg.emb_dim == 8
         assert cfg.hidden_size == 32
         assert cfg.epochs == 5
         assert cfg.window_sizes == (2, 4)
-        assert cfg.timestep_weighting == "linear"
         # Untouched fields keep defaults.
         assert cfg.lr == TrainConfig().lr
 
@@ -163,10 +164,16 @@ class TestLoadConfig:
         with pytest.raises(ValueError, match="Unknown sequence config keys"):
             load_sequence_config(p)
 
-    def test_bad_timestep_weighting(self, tmp_path: Path) -> None:
+    def test_early_prediction_config_key_removed(self, tmp_path: Path) -> None:
         p = tmp_path / "c.yaml"
-        p.write_text("timestep_weighting: cubic\n")
-        with pytest.raises(ValueError, match="timestep_weighting"):
+        p.write_text("early_prediction: true\n")
+        with pytest.raises(ValueError, match="Unknown sequence config keys"):
+            load_sequence_config(p)
+
+    def test_timestep_weighting_config_key_removed(self, tmp_path: Path) -> None:
+        p = tmp_path / "c.yaml"
+        p.write_text("timestep_weighting: linear\n")
+        with pytest.raises(ValueError, match="Unknown sequence config keys"):
             load_sequence_config(p)
 
     def test_malformed_window_sizes(self, tmp_path: Path) -> None:
@@ -283,15 +290,13 @@ class TestPrepareData:
 class TestCheckpointRoundTrip:
     """Bit-exact save/load round-trip and schema validation."""
 
-    @pytest.mark.parametrize("early", [False, True])
-    def test_roundtrip_bit_exact(self, tmp_path: Path, early: bool) -> None:
+    def test_roundtrip_bit_exact(self, tmp_path: Path) -> None:
         data = _prepared_from_synthetic()
         config = TrainConfig(
             emb_dim=4,
             hidden_size=8,
             epochs=1,
             batch_size=16,
-            early_prediction=early,
             window_sizes=None,
         )
         model, _ = train(data, config)
@@ -302,7 +307,6 @@ class TestCheckpointRoundTrip:
             data.preprocessor,
             data.sensor_cols,
             data.pos_weight,
-            config.timestep_weighting,
             config.seed,
             config.epochs,
             config.lr,
@@ -335,7 +339,6 @@ class TestCheckpointRoundTrip:
             data.preprocessor,
             data.sensor_cols,
             data.pos_weight,
-            "none",
             42,
             0,
             1e-3,
@@ -347,7 +350,8 @@ class TestCheckpointRoundTrip:
         assert isinstance(raw["model_state_dict"], dict)
         assert isinstance(raw["n_sensors"], int)
         assert isinstance(raw["dropout"], float)
-        assert isinstance(raw["early_prediction"], bool)
+        assert "early_prediction" not in raw
+        assert "timestep_weighting" not in raw
         assert isinstance(raw["preprocessor"], dict)
         assert isinstance(raw["sensor_cols"], list)
         assert isinstance(raw["created_at"], str)
@@ -364,7 +368,7 @@ class TestCheckpointRoundTrip:
         ckpt_path = tmp_path / "ckpt.pt"
         save_checkpoint(
             ckpt_path, model, data.preprocessor, data.sensor_cols,
-            data.pos_weight, "none", 42, 0, 1e-3, 32, "cpu",
+            data.pos_weight, 42, 0, 1e-3, 32, "cpu",
         )
         loaded = load_checkpoint(ckpt_path)
         retained = loaded.sensor_cols[0]
@@ -380,7 +384,7 @@ class TestCheckpointRoundTrip:
             save_checkpoint(
                 tmp_path / "c.pt", model, data.preprocessor,
                 data.sensor_cols + ["extra"], data.pos_weight,
-                "none", 42, 0, 1e-3, 32, "cpu",
+                42, 0, 1e-3, 32, "cpu",
             )
 
     def test_missing_file(self, tmp_path: Path) -> None:
@@ -400,7 +404,7 @@ class TestCheckpointRoundTrip:
         ckpt_path = tmp_path / "ckpt.pt"
         save_checkpoint(
             ckpt_path, model, data.preprocessor, data.sensor_cols,
-            data.pos_weight, "none", 42, 0, 1e-3, 32, "cpu",
+            data.pos_weight, 42, 0, 1e-3, 32, "cpu",
         )
         raw = torch.load(ckpt_path, weights_only=False)
         raw["format_version"] = 2
@@ -409,18 +413,36 @@ class TestCheckpointRoundTrip:
             load_checkpoint(ckpt_path)
 
 
-def _trained_checkpoint(tmp_path: Path, early: bool = False) -> LoadedCheckpoint:
+class TestTrainingLoss:
+    """Training objective semantics."""
+
+    def test_uses_final_window_logit(self) -> None:
+        model = build_gru(n_sensors=5, emb_dim=3, hidden_size=4)
+        x = torch.randn(3, 5)
+        ids = torch.from_numpy(np.tile(np.arange(5), (3, 1)))
+        y = torch.tensor([0.0, 1.0, 0.0])
+        pos_weight = torch.tensor([2.0])
+
+        loss = _block_loss(model, x, ids, y, pos_weight)
+        expected = F.binary_cross_entropy_with_logits(
+            predict_logits(model, x, ids), y, pos_weight=pos_weight
+        )
+
+        assert torch.allclose(loss, expected)
+
+
+def _trained_checkpoint(tmp_path: Path) -> LoadedCheckpoint:
     data = _prepared_from_synthetic()
     config = TrainConfig(
         emb_dim=4, hidden_size=8, epochs=1, batch_size=16,
-        early_prediction=early, window_sizes=None,
+        window_sizes=None,
     )
     model, _ = train(data, config)
     ckpt_path = tmp_path / "ckpt.pt"
     save_checkpoint(
         ckpt_path, model, data.preprocessor, data.sensor_cols,
-        data.pos_weight, config.timestep_weighting, config.seed,
-        config.epochs, config.lr, config.batch_size, "cpu",
+        data.pos_weight, config.seed, config.epochs, config.lr,
+        config.batch_size, "cpu",
     )
     return load_checkpoint(ckpt_path)
 
@@ -575,22 +597,21 @@ class TestBaselineComparison:
 
 
 class TestSmoke:
-    """End-to-end smoke on synthetic arrays for both modes."""
+    """End-to-end smoke on synthetic arrays."""
 
-    @pytest.mark.parametrize("early", [False, True])
-    def test_full_pipeline(self, tmp_path: Path, early: bool) -> None:
+    def test_full_pipeline(self, tmp_path: Path) -> None:
         data = _prepared_from_synthetic()
         config = TrainConfig(
             emb_dim=4, hidden_size=8, epochs=2, batch_size=16,
-            early_prediction=early, window_sizes=None,
+            window_sizes=None,
         )
         model, history = train(data, config)
         assert len(history) == 2
         ckpt_path = tmp_path / "ckpt.pt"
         save_checkpoint(
             ckpt_path, model, data.preprocessor, data.sensor_cols,
-            data.pos_weight, config.timestep_weighting, config.seed,
-            config.epochs, config.lr, config.batch_size, "cpu",
+            data.pos_weight, config.seed, config.epochs, config.lr,
+            config.batch_size, "cpu",
         )
         loaded = load_checkpoint(ckpt_path)
         y_prob, metrics = evaluate(
@@ -631,8 +652,7 @@ class TestEdgeCases:
         ckpt_path = tmp_path / "ckpt.pt"
         save_checkpoint(
             ckpt_path, model, data.preprocessor, data.sensor_cols,
-            data.pos_weight, "none", config.seed, 0, config.lr,
-            config.batch_size, "cpu",
+            data.pos_weight, config.seed, 0, config.lr, config.batch_size, "cpu",
         )
         raw = torch.load(ckpt_path, weights_only=False)
         assert raw["epochs"] == 0

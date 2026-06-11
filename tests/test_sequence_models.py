@@ -7,14 +7,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from torch.nn import functional as F
 
 from tests.conftest import make_synthetic
 from yield_risk.sequence_models import (
     RawSensorCleaner,
     SequenceSensorPipeline,
     build_gru,
-    build_timestep_weights,
     compute_pos_weight,
     predict_logits,
 )
@@ -36,12 +34,14 @@ class TestForwardShapes:
         assert out.shape == (4,)
         assert out.dtype == torch.float32
 
-    def test_early_mode_shape(self) -> None:
-        model = build_gru(n_sensors=6, emb_dim=4, hidden_size=8, early_prediction=True)
-        x = torch.randn(4, 6)
-        ids = torch.randint(0, 6, (4, 6))
-        out = model(x, ids)
-        assert out.shape == (4, 6)
+    def test_early_prediction_argument_removed(self) -> None:
+        with pytest.raises(TypeError, match="early_prediction"):
+            build_gru(
+                n_sensors=6,
+                emb_dim=4,
+                hidden_size=8,
+                early_prediction=True,  # type: ignore[call-arg]
+            )
 
     def test_shorter_window(self) -> None:
         model = build_gru(n_sensors=6, emb_dim=4, hidden_size=8)
@@ -49,8 +49,8 @@ class TestForwardShapes:
         ids = torch.randint(0, 6, (4, 3))
         assert model(x, ids).shape == (4,)
 
-    def test_predict_logits_early_final_timestep(self) -> None:
-        model = build_gru(n_sensors=6, emb_dim=4, hidden_size=8, early_prediction=True)
+    def test_predict_logits_shape(self) -> None:
+        model = build_gru(n_sensors=6, emb_dim=4, hidden_size=8)
         x = torch.randn(4, 5)
         ids = torch.randint(0, 6, (4, 5))
         assert predict_logits(model, x, ids).shape == (4,)
@@ -255,83 +255,6 @@ class TestPosWeight:
     def test_no_negative(self) -> None:
         with pytest.raises(ValueError, match="no negative samples"):
             compute_pos_weight(np.ones(10, dtype=np.int64))
-
-
-class TestTimestepWeights:
-    """Timestep-weighting schemes sum to 1 with correct shape."""
-
-    def test_none_uniform(self) -> None:
-        w = build_timestep_weights(5, "none", "cpu")
-        assert torch.allclose(w, torch.full((5,), 0.2))
-        assert math.isclose(float(w.sum()), 1.0, abs_tol=1e-6)
-
-    def test_linear_increasing(self) -> None:
-        w = build_timestep_weights(6, "linear", "cpu")
-        assert float(w[-1]) > float(w[0])
-        assert torch.all(w[1:] > w[:-1])
-        assert math.isclose(float(w.sum()), 1.0, abs_tol=1e-6)
-
-    def test_sqrt_increasing(self) -> None:
-        w = build_timestep_weights(6, "sqrt", "cpu")
-        assert torch.all(w[1:] > w[:-1])
-        assert math.isclose(float(w.sum()), 1.0, abs_tol=1e-6)
-
-    def test_unknown_scheme(self) -> None:
-        with pytest.raises(ValueError, match="Unknown timestep_weighting scheme"):
-            build_timestep_weights(4, "bogus", "cpu")
-
-    def test_invalid_window_size(self) -> None:
-        with pytest.raises(ValueError, match="window_size must be >= 1"):
-            build_timestep_weights(0, "none", "cpu")
-
-
-class TestEarlyPredictionLoss:
-    """Early-prediction loss target broadcast and weighting behavior."""
-
-    def _setup(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        torch.manual_seed(0)
-        b, w = 4, 5
-        logits = torch.randn(b, w)
-        y = torch.tensor([0.0, 1.0, 0.0, 1.0])
-        targets = y.unsqueeze(1).expand(b, w)
-        pos_weight = torch.tensor([2.0])
-        elem = F.binary_cross_entropy_with_logits(
-            logits, targets, pos_weight=pos_weight, reduction="none"
-        )
-        return elem, y, pos_weight
-
-    def _loss(self, elem: torch.Tensor, scheme: str) -> float:
-        w = build_timestep_weights(elem.shape[1], scheme, "cpu")
-        per_sample = (elem * w.unsqueeze(0)).sum(dim=1)
-        return float(per_sample.mean())
-
-    def test_target_broadcast_shape(self) -> None:
-        y = torch.tensor([0.0, 1.0, 0.0, 1.0])
-        targets = y.unsqueeze(1).expand(4, 5)
-        assert targets.shape == (4, 5)
-        assert torch.all(targets[:, 0] == y)
-
-    def test_scheme_changes_loss(self) -> None:
-        elem, _, _ = self._setup()
-        assert not math.isclose(
-            self._loss(elem, "none"), self._loss(elem, "linear"), abs_tol=1e-6
-        )
-
-    def test_none_equals_mean_reduction(self) -> None:
-        torch.manual_seed(1)
-        logits = torch.randn(4, 5)
-        y = torch.tensor([0.0, 1.0, 0.0, 1.0])
-        targets = y.unsqueeze(1).expand(4, 5)
-        pos_weight = torch.tensor([2.0])
-        elem = F.binary_cross_entropy_with_logits(
-            logits, targets, pos_weight=pos_weight, reduction="none"
-        )
-        mean_red = float(
-            F.binary_cross_entropy_with_logits(
-                logits, targets, pos_weight=pos_weight, reduction="mean"
-            )
-        )
-        assert math.isclose(self._loss(elem, "none"), mean_red, abs_tol=1e-6)
 
 
 class TestMetrics:

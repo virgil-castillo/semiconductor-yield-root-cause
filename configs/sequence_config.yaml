@@ -1,5 +1,5 @@
 # Hyperparameters for the experimental GRU sequence model.
-# Override any value at the CLI, e.g. --epochs 50 --early-prediction.
+# Override any value at the CLI, e.g. --epochs 50.
 emb_dim: 16
 hidden_size: 64
 num_layers: 1
@@ -7,8 +7,6 @@ dropout: 0.0
 lr: 0.001
 batch_size: 32
 epochs: 30
-early_prediction: false
-timestep_weighting: none   # one of: none | linear | sqrt
 seed: 42
 device: cpu                # one of: cpu | cuda | auto
 num_workers: 0

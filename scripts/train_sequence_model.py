@@ -122,18 +122,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Number of training epochs (fixed; no early stopping).",
     )
     parser.add_argument(
-        "--early-prediction",
-        action="store_true",
-        default=None,
-        help="Enable per-timestep early-prediction mode.",
-    )
-    parser.add_argument(
-        "--timestep-weighting",
-        choices=["none", "linear", "sqrt"],
-        default=None,
-        help="Timestep weighting scheme for early-prediction mode.",
-    )
-    parser.add_argument(
         "--seed",
         type=int,
         default=None,
@@ -208,11 +196,6 @@ def _apply_overrides(
         overrides["batch_size"] = args.batch_size
     if args.epochs is not None:
         overrides["epochs"] = args.epochs
-    # --early-prediction is store_true with default=None; True only when flag present
-    if args.early_prediction is not None and args.early_prediction is not False:
-        overrides["early_prediction"] = True
-    if args.timestep_weighting is not None:
-        overrides["timestep_weighting"] = args.timestep_weighting
     if args.seed is not None:
         overrides["seed"] = args.seed
     if args.device is not None:
@@ -272,7 +255,6 @@ def main() -> None:
             preprocessor=data.preprocessor,
             sensor_cols=data.sensor_cols,
             pos_weight=data.pos_weight,
-            timestep_weighting=seq_config.timestep_weighting,
             random_seed=seq_config.seed,
             epochs=seq_config.epochs,
             lr=seq_config.lr,

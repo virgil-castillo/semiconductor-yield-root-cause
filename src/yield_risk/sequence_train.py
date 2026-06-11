@@ -40,14 +40,11 @@ from yield_risk.sequence_models import (
     SequenceSensorPipeline,
     _as_str_list,
     build_gru,
-    build_timestep_weights,
     compute_pos_weight,
     make_loader,
     predict_logits,
 )
 from yield_risk.validation import validate_secom
-
-_VALID_WEIGHTING = {"none", "linear", "sqrt"}
 
 
 # --------------------------------------------------------------------------- #
@@ -65,8 +62,6 @@ class TrainConfig:
         lr: Adam learning rate.
         batch_size: Mini-batch size.
         epochs: Number of training epochs (fixed; no early stopping).
-        early_prediction: Whether to train in per-timestep mode.
-        timestep_weighting: Early-mode weighting scheme.
         seed: Global RNG seed.
         device: Requested compute device.
         num_workers: DataLoader worker count.
@@ -82,8 +77,6 @@ class TrainConfig:
     lr: float = 1e-3
     batch_size: int = 32
     epochs: int = 30
-    early_prediction: bool = False
-    timestep_weighting: str = "none"
     seed: int = 42
     device: str = "cpu"
     num_workers: int = 0
@@ -171,8 +164,8 @@ def load_sequence_config(
 
     Raises:
         ValueError: If the YAML contains keys not present on ``TrainConfig``, a
-            value cannot be coerced to its field type, ``timestep_weighting``
-            is invalid, or ``window_sizes`` is malformed.
+            value cannot be coerced to its field type, or ``window_sizes`` is
+            malformed.
     """
     cfg_path = Path(path)
     if not cfg_path.exists():
@@ -194,13 +187,6 @@ def load_sequence_config(
     for key, value in raw.items():
         if key == "window_sizes":
             kwargs[key] = _coerce_window_sizes(value)
-        elif key == "timestep_weighting":
-            scheme = str(value)
-            if scheme not in _VALID_WEIGHTING:
-                raise ValueError(
-                    "Could not coerce config field 'timestep_weighting'"
-                )
-            kwargs[key] = scheme
         else:
             ftype = _scalar_field_type(field_types[key])
             kwargs[key] = _coerce_scalar(key, ftype, value)
@@ -485,37 +471,14 @@ def set_global_determinism(seed: int) -> None:
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 
-def _block_weights(
-    block: WindowArrays, config: TrainConfig, device: str
-) -> Tensor | None:
-    """Build the sum-to-1 timestep weights for one window block (early mode only).
-
-    Args:
-        block: The window block whose fixed width sets the weight length.
-        config: Hyperparameters (mode and weighting scheme).
-        device: Compute device for the returned tensor.
-
-    Returns:
-        A ``(W,)`` float32 weights tensor in early mode, or ``None`` in standard
-        mode (where timestep weighting does not apply).
-    """
-    if not config.early_prediction:
-        return None
-    return build_timestep_weights(
-        block.x.shape[1], config.timestep_weighting, device
-    )
-
-
 def _block_loss(
     model: SecomGRU,
     x: Tensor,
     sensor_ids: Tensor,
     y: Tensor,
     pos_weight_tensor: Tensor,
-    early_prediction: bool,
-    timestep_weights: Tensor | None,
 ) -> Tensor:
-    """Compute the per-batch loss for either mode (§7).
+    """Compute final-window binary cross-entropy for one batch.
 
     Args:
         model: The GRU model.
@@ -523,28 +486,12 @@ def _block_loss(
         sensor_ids: Sensor IDs, shape ``(B, W)``.
         y: Float labels, shape ``(B,)``.
         pos_weight_tensor: ``pos_weight`` tensor, shape ``(1,)``.
-        early_prediction: Whether to use early-mode loss.
-        timestep_weights: Precomputed sum-to-1 timestep weights, shape ``(W,)``;
-            required in early mode, ignored in standard mode.
 
     Returns:
         A scalar loss tensor.
     """
-    if not early_prediction:
-        logits = model(x, sensor_ids)
-        return F.binary_cross_entropy_with_logits(
-            logits, y, pos_weight=pos_weight_tensor
-        )
-    if timestep_weights is None:
-        raise ValueError("timestep_weights are required in early-prediction mode")
-    logits = model(x, sensor_ids)
-    window = logits.shape[1]
-    targets = y.unsqueeze(1).expand(logits.shape[0], window)
-    elem = F.binary_cross_entropy_with_logits(
-        logits, targets, pos_weight=pos_weight_tensor, reduction="none"
-    )
-    per_sample = (elem * timestep_weights.unsqueeze(0)).sum(dim=1)
-    return per_sample.mean()
+    logits = predict_logits(model, x, sensor_ids)
+    return F.binary_cross_entropy_with_logits(logits, y, pos_weight=pos_weight_tensor)
 
 
 def train(
@@ -574,7 +521,6 @@ def train(
         hidden_size=config.hidden_size,
         num_layers=config.num_layers,
         dropout=config.dropout,
-        early_prediction=config.early_prediction,
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
@@ -592,12 +538,6 @@ def train(
         )
         for block_idx, block in enumerate(data.train_windows)
     ]
-    # Timestep weights depend only on the (fixed) window width of each block, so
-    # build them once per block rather than rebuilding inside the batch loop.
-    train_weights = [
-        _block_weights(block, config, device) for block in data.train_windows
-    ]
-
     if not data.val_windows:
         print("val split empty; skipping validation", file=sys.stderr)
 
@@ -606,7 +546,7 @@ def train(
         model.train()
         total_loss = 0.0
         n_batches = 0
-        for loader, weights in zip(train_loaders, train_weights, strict=True):
+        for loader in train_loaders:
             for x, sensor_ids, y in loader:
                 x = x.to(device)
                 sensor_ids = sensor_ids.to(device)
@@ -618,8 +558,6 @@ def train(
                     sensor_ids,
                     y,
                     pos_weight_tensor,
-                    config.early_prediction,
-                    weights,
                 )
                 loss.backward()  # type: ignore[no-untyped-call]
                 optimizer.step()
@@ -672,7 +610,6 @@ def _evaluate_val(
     labels: list[np.ndarray] = []
     with torch.no_grad():
         for block in data.val_windows:
-            weights = _block_weights(block, config, device)
             loader = make_loader(
                 SecomSequenceDataset(block.x, block.sensor_ids, block.y),
                 batch_size=config.batch_size,
@@ -690,8 +627,6 @@ def _evaluate_val(
                     sensor_ids,
                     y,
                     pos_weight_tensor,
-                    config.early_prediction,
-                    weights,
                 )
                 total_loss += float(loss.detach())
                 n_batches += 1
@@ -719,7 +654,6 @@ def save_checkpoint(
     preprocessor: SequenceSensorPipeline,
     sensor_cols: list[str],
     pos_weight: float,
-    timestep_weighting: str,
     random_seed: int,
     epochs: int,
     lr: float,
@@ -734,7 +668,6 @@ def save_checkpoint(
         preprocessor: Fitted preprocessing pipeline.
         sensor_cols: Ordered retained model sensor names.
         pos_weight: Train-only ``n_neg / n_pos``.
-        timestep_weighting: Early-mode weighting scheme (persisted always).
         random_seed: Global seed used for training.
         epochs: Epochs actually trained.
         lr: Adam learning rate.
@@ -768,8 +701,6 @@ def save_checkpoint(
         "hidden_size": int(model.hidden_size),
         "num_layers": int(model.num_layers),
         "dropout": float(model.dropout),
-        "early_prediction": bool(model.early_prediction),
-        "timestep_weighting": str(timestep_weighting),
         "preprocessor": preprocessor.to_dict(),
         "sensor_cols": list(sensor_cols),
         "pos_weight": float(pos_weight),
@@ -794,8 +725,6 @@ class LoadedCheckpoint:
         preprocessor: The training-fitted preprocessing pipeline.
         sensor_cols: Ordered retained model sensor names.
         pos_weight: Train-only ``n_neg / n_pos``.
-        early_prediction: Whether the model was trained in early mode.
-        timestep_weighting: Persisted early-mode weighting scheme.
         raw: The full raw checkpoint dict.
     """
 
@@ -803,8 +732,6 @@ class LoadedCheckpoint:
     preprocessor: SequenceSensorPipeline
     sensor_cols: list[str]
     pos_weight: float
-    early_prediction: bool
-    timestep_weighting: str
     raw: dict[str, object]
 
 
@@ -816,8 +743,6 @@ _REQUIRED_CKPT_KEYS = (
     "hidden_size",
     "num_layers",
     "dropout",
-    "early_prediction",
-    "timestep_weighting",
     "preprocessor",
     "sensor_cols",
     "pos_weight",
@@ -867,7 +792,6 @@ def load_checkpoint(path: Path, device: str = "cpu") -> LoadedCheckpoint:
         hidden_size=int(ckpt["hidden_size"]),  # type: ignore[call-overload]
         num_layers=int(ckpt["num_layers"]),  # type: ignore[call-overload]
         dropout=float(ckpt["dropout"]),  # type: ignore[arg-type]
-        early_prediction=bool(ckpt["early_prediction"]),
     )
     model.load_state_dict(ckpt["model_state_dict"])  # type: ignore[arg-type]
     model.to(device)
@@ -881,8 +805,6 @@ def load_checkpoint(path: Path, device: str = "cpu") -> LoadedCheckpoint:
         preprocessor=preprocessor,
         sensor_cols=_as_str_list(ckpt["sensor_cols"]),
         pos_weight=float(ckpt["pos_weight"]),  # type: ignore[arg-type]
-        early_prediction=bool(ckpt["early_prediction"]),
-        timestep_weighting=str(ckpt["timestep_weighting"]),
         raw=ckpt,
     )
 

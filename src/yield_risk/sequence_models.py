@@ -1,10 +1,9 @@
 """Experimental PyTorch GRU sequence model for SECOM pass/fail prediction.
 
 This module contains the leakage-free raw-to-sequence preprocessing pipeline,
-the ``SecomGRU`` model and its factory, the in-memory dataset/loader, and the
-timestep-weighting helper used by the early-prediction loss. It is fully
-isolated from the tabular pipeline and only mirrors the cleaning decisions of
-``yield_risk.preprocess`` (it never imports or mutates that module's state).
+the ``SecomGRU`` model and its factory, and the in-memory dataset/loader. It is
+fully isolated from the tabular pipeline and only mirrors the cleaning decisions
+of ``yield_risk.preprocess`` (it never imports or mutates that module's state).
 """
 from __future__ import annotations
 
@@ -479,7 +478,6 @@ def build_gru(
     hidden_size: int = 64,
     num_layers: int = 1,
     dropout: float = 0.0,
-    early_prediction: bool = False,
 ) -> SecomGRU:
     """Construct a :class:`SecomGRU` after validating hyperparameters.
 
@@ -489,7 +487,6 @@ def build_gru(
         hidden_size: GRU hidden size.
         num_layers: Number of stacked GRU layers.
         dropout: Inter-layer dropout in ``[0.0, 1.0)``.
-        early_prediction: Whether to emit a logit per timestep.
 
     Returns:
         An initialized ``SecomGRU``.
@@ -513,7 +510,6 @@ def build_gru(
         hidden_size=hidden_size,
         num_layers=num_layers,
         dropout=dropout,
-        early_prediction=early_prediction,
     )
 
 
@@ -521,8 +517,8 @@ class SecomGRU(nn.Module):
     """GRU over an ordered SECOM sensor window with learned sensor-ID embeddings.
 
     Each timestep feeds ``[normalized_value, sensor_id_embedding]`` into the GRU.
-    Standard mode returns one final-timestep logit per wafer; early-prediction
-    mode returns a logit at every timestep.
+    The model returns one final-window logit per wafer after reading the
+    available sensor window.
     """
 
     def __init__(
@@ -532,7 +528,6 @@ class SecomGRU(nn.Module):
         hidden_size: int,
         num_layers: int,
         dropout: float,
-        early_prediction: bool,
     ) -> None:
         """Initialize submodules and persist hyperparameters.
 
@@ -542,7 +537,6 @@ class SecomGRU(nn.Module):
             hidden_size: GRU hidden size.
             num_layers: Number of GRU layers.
             dropout: User-requested inter-layer dropout (persisted as-is).
-            early_prediction: Whether to emit a logit per timestep.
         """
         super().__init__()
         self.embedding = nn.Embedding(num_embeddings=n_sensors, embedding_dim=emb_dim)
@@ -554,7 +548,6 @@ class SecomGRU(nn.Module):
             dropout=(dropout if num_layers > 1 else 0.0),
         )
         self.head = nn.Linear(hidden_size, 1)
-        self.early_prediction = early_prediction
         self.n_sensors = n_sensors
         self.emb_dim = emb_dim
         self.hidden_size = hidden_size
@@ -571,8 +564,7 @@ class SecomGRU(nn.Module):
                 model's device.
 
         Returns:
-            ``early_prediction=False``: logits shape ``(B,)`` float32.
-            ``early_prediction=True``: logits shape ``(B, W)`` float32.
+            Final-window logits, shape ``(B,)`` float32.
 
         Raises:
             ValueError: If ``x``/``sensor_ids`` are not aligned 2-D tensors, if
@@ -595,9 +587,6 @@ class SecomGRU(nn.Module):
         emb = self.embedding(sensor_ids)
         feats = torch.cat([vals, emb], dim=-1)
         out, _ = self.gru(feats)
-        if self.early_prediction:
-            logits_seq: Tensor = self.head(out).squeeze(-1)
-            return logits_seq
         last = out[:, -1, :]
         logit: Tensor = self.head(last).squeeze(-1)
         return logit
@@ -612,13 +601,9 @@ def predict_logits(model: SecomGRU, x: Tensor, sensor_ids: Tensor) -> Tensor:
         sensor_ids: Sensor IDs, shape ``(B, W)`` int64.
 
     Returns:
-        Final-decision logits, shape ``(B,)`` float32. Standard mode returns the
-        forward output directly; early mode returns the final-timestep logit.
+        Final-decision logits, shape ``(B,)`` float32.
     """
     logits: Tensor = model(x, sensor_ids)
-    if model.early_prediction:
-        final: Tensor = logits[:, -1]
-        return final
     return logits
 
 
@@ -716,35 +701,6 @@ def make_loader(
         generator=generator if shuffle else None,
         worker_init_fn=worker_init_fn if num_workers > 0 else None,
     )
-
-
-def build_timestep_weights(window_size: int, scheme: str, device: str) -> Tensor:
-    """Return timestep weights, shape ``(window_size,)`` float32, summing to 1.
-
-    Args:
-        window_size: Number of timesteps ``W``.
-        scheme: One of ``"none"`` (uniform), ``"linear"`` (``t + 1``), or
-            ``"sqrt"`` (``sqrt(t + 1)``).
-        device: Target device string for the returned tensor.
-
-    Returns:
-        A ``(window_size,)`` float32 tensor whose elements sum to 1.
-
-    Raises:
-        ValueError: If ``window_size < 1`` or ``scheme`` is unknown.
-    """
-    if window_size < 1:
-        raise ValueError("window_size must be >= 1")
-    t = torch.arange(1, window_size + 1, dtype=torch.float32, device=device)
-    if scheme == "none":
-        raw = torch.ones(window_size, dtype=torch.float32, device=device)
-    elif scheme == "linear":
-        raw = t
-    elif scheme == "sqrt":
-        raw = torch.sqrt(t)
-    else:
-        raise ValueError(f"Unknown timestep_weighting scheme: {scheme}")
-    return raw / raw.sum()
 
 
 def compute_pos_weight(y_train: np.ndarray) -> float:

@@ -42,7 +42,7 @@ with the defaults written explicitly:
 
 ```yaml
 # Hyperparameters for the experimental GRU sequence model.
-# Override any value at the CLI, e.g. --epochs 50 --early-prediction.
+# Override any value at the CLI, e.g. --epochs 50.
 emb_dim: 16
 hidden_size: 64
 num_layers: 1
@@ -50,8 +50,6 @@ dropout: 0.0
 lr: 0.001
 batch_size: 32
 epochs: 30
-early_prediction: false
-timestep_weighting: none   # one of: none | linear | sqrt
 seed: 42
 device: cpu                # one of: cpu | cuda | auto
 num_workers: 0
@@ -94,8 +92,6 @@ The script:
 | `--dropout F` | 0.0 | Inter-layer dropout |
 | `--lr F` | 0.001 | Adam learning rate |
 | `--batch-size N` | 32 | Mini-batch size |
-| `--early-prediction` | off | Enable per-timestep early-prediction mode |
-| `--timestep-weighting` | `none` | Weighting scheme for early mode: `none`, `linear`, or `sqrt` |
 | `--seed N` | 42 | Global RNG seed |
 | `--device` | `cpu` | Compute device: `cpu`, `cuda`, or `auto` |
 | `--val-size F` | 0.10 | Validation carve-out fraction |
@@ -253,32 +249,15 @@ points; AUC comparisons are threshold-free and remain the primary signal.
 
 ---
 
-## Early-prediction mode
+## Final-window objective
 
-Standard mode feeds the full retained sensor window through the GRU and returns
-one logit per wafer from the final hidden state.
+The GRU reads the available retained sensor window and returns one logit per
+wafer from the final hidden state. This is true whether the available input is a
+full retained row or a shorter current window.
 
-Early-prediction mode (`--early-prediction`) emits a logit at **every
-timestep**. At training time, each timestep's logit is compared to the wafer
-label, and the per-timestep losses are combined using a weighted sum. This
-allows the model to learn to predict failure risk from partial windows, which
-mirrors the current-window scoring use case.
-
-### Timestep weighting schemes
-
-The `--timestep-weighting` flag controls how per-timestep losses are weighted.
-All three schemes are normalized to sum to 1, so loss values remain on the same
-scale regardless of window size or scheme:
-
-| Scheme | Weight at timestep `t` (1-indexed) | Effect |
-|---|---|---|
-| `none` (default) | `1 / W` (uniform) | Each timestep contributes equally |
-| `linear` | `t / sum(1..W)` | Later timesteps weighted more strongly; strictly increasing |
-| `sqrt` | `sqrt(t) / sum(sqrt(1)..sqrt(W))` | Later timesteps up-weighted more gently; increasing but sub-linear |
-
-At **evaluation time**, both modes use the **final-timestep logit** for all
-scored metrics and threshold comparisons, so results are directly comparable
-between standard and early-prediction runs.
+Training, validation, and evaluation all use this single final-window logit.
+For shorter windows, the prediction is made after the supplied window has been
+read, not at each intermediate sensor position.
 
 ---
 
