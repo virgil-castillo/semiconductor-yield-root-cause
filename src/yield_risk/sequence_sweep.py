@@ -1,8 +1,8 @@
 """GRU hyperparameter sweep grid generator.
 
 This module owns the sweep parameter grid definition, the ``TrialSpec``
-container, the ``TrialResult`` container, and ranking/selection helpers.
-It does NOT run trials; that is a later task.
+container, the ``TrialResult`` container, ranking/selection helpers, and the
+single-trial runner ``run_trial``.
 
 Grid enumeration order (outermost to innermost loop):
     1. emb_dim       — [8, 16, 32]
@@ -20,10 +20,28 @@ and deterministic across runs.
 from __future__ import annotations
 
 import dataclasses
+import json
 import math
+import warnings
 from dataclasses import dataclass
+from pathlib import Path
 
-from yield_risk.sequence_train import TrainConfig
+import numpy as np
+import torch
+
+from yield_risk.sequence_models import (
+    SecomGRU,
+    SecomSequenceDataset,
+    make_loader,
+    predict_logits,
+)
+from yield_risk.sequence_train import (
+    PreparedData,
+    TrainConfig,
+    compute_sequence_metrics,
+    save_checkpoint,
+    train,
+)
 
 # ---------------------------------------------------------------------------
 # Sweep axes
@@ -209,3 +227,161 @@ def select_best(results: list[TrialResult]) -> TrialResult | None:
     if not ranked or ranked[0].status != "ok":
         return None
     return ranked[0]
+
+
+def _val_roc_auc(
+    model: SecomGRU,
+    data: PreparedData,
+    config: TrainConfig,
+    device: str,
+) -> float | None:
+    """Score all val_windows and return ROC-AUC, or None if unavailable.
+
+    Args:
+        model: The trained GRU in eval() mode.
+        data: Prepared data with val window blocks.
+        config: Hyperparameters (batch_size, num_workers, seed).
+        device: Compute device.
+
+    Returns:
+        ROC-AUC as a float, or ``None`` when val is empty, single-class, or
+        the computed value is NaN.
+    """
+    if not data.val_windows:
+        return None
+
+    probs: list[np.ndarray] = []
+    labels: list[np.ndarray] = []
+    model.eval()
+    with torch.no_grad():
+        for block in data.val_windows:
+            loader = make_loader(
+                SecomSequenceDataset(block.x, block.sensor_ids, block.y),
+                batch_size=config.batch_size,
+                shuffle=False,
+                seed=config.seed,
+                num_workers=config.num_workers,
+            )
+            for x_b, sensor_ids_b, y_b in loader:
+                x_b = x_b.to(device)
+                sensor_ids_b = sensor_ids_b.to(device)
+                logits = predict_logits(model, x_b, sensor_ids_b)
+                probs.append(
+                    torch.sigmoid(logits).cpu().numpy().astype(np.float64)
+                )
+                labels.append(y_b.numpy().astype(np.int64))
+
+    y_true = np.concatenate(labels)
+    y_prob = np.concatenate(probs)
+
+    if len(np.unique(y_true)) < 2:
+        return None
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        metrics = compute_sequence_metrics(y_true, y_prob)
+
+    roc = metrics.roc_auc
+    if math.isnan(roc):
+        return None
+    return float(roc)
+
+
+def run_trial(
+    spec: TrialSpec,
+    data: PreparedData,
+    models_dir: Path,
+    reports_dir: Path,
+    device: str = "cpu",
+) -> TrialResult:
+    """Run one sweep trial; return a ``TrialResult``.
+
+    Creates output directories, trains the model, saves the checkpoint and
+    training history, then computes validation metrics. Any exception is caught
+    and recorded as a failed trial rather than propagating.
+
+    Args:
+        spec: The trial specification with trial_id and config.
+        data: Prepared leakage-free training data.
+        models_dir: Root models directory; checkpoint written under
+            ``models_dir/sequence_sweep/<trial_id>/sequence_gru.pt``.
+        reports_dir: Root reports directory; history written under
+            ``reports_dir/sequence_sweep/<trial_id>/sequence_train_history.json``.
+        device: Compute device string.
+
+    Returns:
+        A ``TrialResult`` with ``status="ok"`` on success or
+        ``status="failed"`` on any exception.
+    """
+    trial_models_dir = models_dir / "sequence_sweep" / spec.trial_id
+    trial_reports_dir = reports_dir / "sequence_sweep" / spec.trial_id
+    trial_models_dir.mkdir(parents=True, exist_ok=True)
+    trial_reports_dir.mkdir(parents=True, exist_ok=True)
+
+    cfg = spec.config
+
+    try:
+        model, history = train(data, cfg)
+
+        checkpoint_path = trial_models_dir / "sequence_gru.pt"
+        save_checkpoint(
+            path=checkpoint_path,
+            model=model,
+            preprocessor=data.preprocessor,
+            sensor_cols=data.sensor_cols,
+            pos_weight=data.pos_weight,
+            random_seed=cfg.seed,
+            epochs=cfg.epochs,
+            lr=cfg.lr,
+            batch_size=cfg.batch_size,
+            device=cfg.device,
+        )
+
+        history_path = trial_reports_dir / "sequence_train_history.json"
+        history_path.write_text(json.dumps(history, indent=2))
+
+        if history:
+            last = history[-1]
+            val_loss = float(last["val_loss"])
+            val_pr_auc = float(last["val_pr_auc"])
+        else:
+            val_loss = math.nan
+            val_pr_auc = math.nan
+
+        roc_auc = _val_roc_auc(model, data, cfg, device)
+        n_params = sum(p.numel() for p in model.parameters())
+
+        return TrialResult(
+            trial_id=spec.trial_id,
+            emb_dim=cfg.emb_dim,
+            hidden_size=cfg.hidden_size,
+            num_layers=cfg.num_layers,
+            dropout=cfg.dropout,
+            lr=cfg.lr,
+            batch_size=cfg.batch_size,
+            val_loss=val_loss,
+            val_pr_auc=val_pr_auc,
+            val_roc_auc=roc_auc,
+            n_params=n_params,
+            checkpoint_path=str(checkpoint_path),
+            status="ok",
+            error=None,
+        )
+
+    except Exception as exc:  # noqa: BLE001
+        return TrialResult(
+            trial_id=spec.trial_id,
+            emb_dim=cfg.emb_dim,
+            hidden_size=cfg.hidden_size,
+            num_layers=cfg.num_layers,
+            dropout=cfg.dropout,
+            lr=cfg.lr,
+            batch_size=cfg.batch_size,
+            val_loss=math.nan,
+            val_pr_auc=math.nan,
+            val_roc_auc=None,
+            n_params=None,
+            checkpoint_path=None,
+            status="failed",
+            error=str(exc),
+        )

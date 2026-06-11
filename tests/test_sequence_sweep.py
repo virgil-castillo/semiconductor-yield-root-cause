@@ -1,13 +1,217 @@
 """Tests for the GRU hyperparameter sweep grid generator."""
 from __future__ import annotations
 
+import json
 import math
 import re
+from pathlib import Path
 
+import numpy as np
 import pytest
 
-from yield_risk.sequence_sweep import TrialResult
-from yield_risk.sequence_train import TrainConfig  # noqa: E402
+from yield_risk.sequence_sweep import TrialResult, TrialSpec
+from yield_risk.sequence_train import (
+    PreparedData,
+    TrainConfig,
+    WindowArrays,
+)
+
+# ---------------------------------------------------------------------------
+# Helpers shared by run_trial tests
+# ---------------------------------------------------------------------------
+
+def _make_two_class_prepared(tmp_path: Path) -> PreparedData:  # noqa: ARG001
+    """Build a tiny PreparedData with two-class val_windows."""
+    from tests.conftest import make_synthetic
+    from yield_risk.sequence_models import SequenceSensorPipeline
+
+    n_rows = 60
+    n_sensors = 8
+    x, y = make_synthetic(n_rows=n_rows, n_sensors=n_sensors, n_pos=15, seed=0)
+    raw_cols = [f"sensor_{i}" for i in range(n_sensors)]
+
+    # Train/val split: first 40 train, last 20 val (both two-class)
+    x_train, x_val = x[:40], x[40:]
+    y_train, y_val = y[:40], y[40:]
+
+    # Ensure val has at least one of each class
+    y_val[0] = 0
+    y_val[1] = 1
+
+    pipe = SequenceSensorPipeline.fit(
+        x_train, raw_cols, 0.5, 1e-6, 0.95
+    )
+    sensor_cols = pipe.sensor_cols
+    x_norm_tr, ids_tr = pipe.transform_full(x_train, raw_cols)
+    x_norm_val, ids_val = pipe.transform_full(x_val, raw_cols)
+
+    train_windows = [
+        WindowArrays(x_norm_tr, ids_tr, y_train.astype(np.int64), list(sensor_cols))
+    ]
+    val_windows = [
+        WindowArrays(x_norm_val, ids_val, y_val.astype(np.int64), list(sensor_cols))
+    ]
+
+    n_pos_tr = int((y_train == 1).sum())
+    n_neg_tr = int((y_train == 0).sum())
+    pos_weight = float(n_neg_tr) / float(max(n_pos_tr, 1))
+
+    return PreparedData(
+        train_windows=train_windows,
+        val_windows=val_windows,
+        x_test_raw=x_val,
+        y_test=y_val.astype(np.int64),
+        raw_sensor_cols=raw_cols,
+        sensor_cols=list(sensor_cols),
+        preprocessor=pipe,
+        pos_weight=pos_weight,
+    )
+
+
+def _make_tiny_spec() -> TrialSpec:
+    config = TrainConfig(
+        emb_dim=8,
+        hidden_size=16,
+        num_layers=1,
+        dropout=0.0,
+        lr=0.001,
+        batch_size=32,
+        epochs=1,
+        seed=0,
+        device="cpu",
+        num_workers=0,
+    )
+    return TrialSpec(trial_id="trial_000", config=config)
+
+
+# ---------------------------------------------------------------------------
+# run_trial: success path (two-class val)
+# ---------------------------------------------------------------------------
+
+
+def test_run_trial_success_path(tmp_path: Path) -> None:
+    """run_trial with two-class val produces ok status with all artifacts."""
+    from yield_risk.sequence_sweep import run_trial
+
+    models_dir = tmp_path / "models"
+    reports_dir = tmp_path / "reports"
+    spec = _make_tiny_spec()
+    data = _make_two_class_prepared(tmp_path)
+
+    result = run_trial(spec, data, models_dir, reports_dir, device="cpu")
+
+    # Status
+    assert result.status == "ok"
+    assert result.error is None
+
+    # Checkpoint file exists
+    ckpt_path = models_dir / "sequence_sweep" / spec.trial_id / "sequence_gru.pt"
+    assert ckpt_path.exists(), f"checkpoint not found at {ckpt_path}"
+    assert result.checkpoint_path == str(ckpt_path)
+
+    # History JSON exists and val_pr_auc matches final epoch
+    hist_path = (
+        reports_dir / "sequence_sweep" / spec.trial_id / "sequence_train_history.json"
+    )
+    assert hist_path.exists(), f"history JSON not found at {hist_path}"
+    history = json.loads(hist_path.read_text())
+    assert len(history) == 1  # epochs=1
+    assert result.val_pr_auc == history[-1]["val_pr_auc"]
+
+    # n_params is a positive int
+    assert isinstance(result.n_params, int)
+    assert result.n_params > 0
+
+    # val_roc_auc is a float (two-class val)
+    assert isinstance(result.val_roc_auc, float)
+
+    # Swept params copied from spec.config
+    assert result.emb_dim == spec.config.emb_dim
+    assert result.hidden_size == spec.config.hidden_size
+    assert result.num_layers == spec.config.num_layers
+    assert result.dropout == spec.config.dropout
+    assert result.lr == spec.config.lr
+    assert result.batch_size == spec.config.batch_size
+
+
+# ---------------------------------------------------------------------------
+# run_trial: empty-val path
+# ---------------------------------------------------------------------------
+
+
+def test_run_trial_empty_val(tmp_path: Path) -> None:
+    """run_trial with empty val_windows gives ok status, None roc_auc, NaN pr_auc."""
+    from tests.conftest import make_synthetic
+    from yield_risk.sequence_models import SequenceSensorPipeline
+    from yield_risk.sequence_sweep import run_trial
+
+    n_sensors = 8
+    x, y = make_synthetic(n_rows=40, n_sensors=n_sensors, n_pos=10, seed=1)
+    raw_cols = [f"sensor_{i}" for i in range(n_sensors)]
+    pipe = SequenceSensorPipeline.fit(x, raw_cols, 0.5, 1e-6, 0.95)
+    sensor_cols = pipe.sensor_cols
+    x_norm, ids = pipe.transform_full(x, raw_cols)
+    train_windows = [
+        WindowArrays(x_norm, ids, y.astype(np.int64), list(sensor_cols))
+    ]
+    n_pos_tr = int((y == 1).sum())
+    n_neg_tr = int((y == 0).sum())
+    data = PreparedData(
+        train_windows=train_windows,
+        val_windows=[],
+        x_test_raw=x[:5],
+        y_test=y[:5].astype(np.int64),
+        raw_sensor_cols=raw_cols,
+        sensor_cols=list(sensor_cols),
+        preprocessor=pipe,
+        pos_weight=float(n_neg_tr) / float(max(n_pos_tr, 1)),
+    )
+
+    models_dir = tmp_path / "models"
+    reports_dir = tmp_path / "reports"
+    spec = _make_tiny_spec()
+
+    result = run_trial(spec, data, models_dir, reports_dir, device="cpu")
+
+    assert result.status == "ok"
+    assert result.val_roc_auc is None
+    assert math.isnan(result.val_pr_auc)
+
+    ckpt_path = models_dir / "sequence_sweep" / spec.trial_id / "sequence_gru.pt"
+    assert ckpt_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# run_trial: failure path (monkeypatched train raises)
+# ---------------------------------------------------------------------------
+
+
+def test_run_trial_failure_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run_trial records a failed trial when train raises; no checkpoint written."""
+    from yield_risk.sequence_sweep import run_trial
+
+    def _boom(
+        data: PreparedData, config: TrainConfig
+    ) -> object:
+        raise RuntimeError("synthetic failure")
+
+    monkeypatch.setattr("yield_risk.sequence_sweep.train", _boom)
+
+    models_dir = tmp_path / "models"
+    reports_dir = tmp_path / "reports"
+    spec = _make_tiny_spec()
+    data = _make_two_class_prepared(tmp_path)
+
+    result = run_trial(spec, data, models_dir, reports_dir, device="cpu")
+
+    assert result.status == "failed"
+    assert result.error is not None and len(result.error) > 0
+    assert result.checkpoint_path is None
+
+    ckpt_path = models_dir / "sequence_sweep" / spec.trial_id / "sequence_gru.pt"
+    assert not ckpt_path.exists(), "checkpoint should not exist on failure"
 
 # ---------------------------------------------------------------------------
 # Helpers
