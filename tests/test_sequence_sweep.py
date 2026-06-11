@@ -1,10 +1,12 @@
 """Tests for the GRU hyperparameter sweep grid generator."""
 from __future__ import annotations
 
+import math
 import re
 
 import pytest
 
+from yield_risk.sequence_sweep import TrialResult
 from yield_risk.sequence_train import TrainConfig  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -176,3 +178,148 @@ def test_trial_spec_is_frozen() -> None:
     spec = grid[0]
     with pytest.raises(Exception):  # dataclasses.FrozenInstanceError
         spec.trial_id = "hacked"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# TrialResult + rank_trials + select_best
+# ---------------------------------------------------------------------------
+
+
+def _make_ok(
+    trial_id: str,
+    val_pr_auc: float,
+    val_loss: float,
+    n_params: int | None = 100,
+    val_roc_auc: float | None = None,
+) -> TrialResult:
+    return TrialResult(
+        trial_id=trial_id,
+        emb_dim=8,
+        hidden_size=32,
+        num_layers=1,
+        dropout=0.0,
+        lr=0.001,
+        batch_size=32,
+        val_loss=val_loss,
+        val_pr_auc=val_pr_auc,
+        val_roc_auc=val_roc_auc,
+        n_params=n_params,
+        checkpoint_path="/tmp/ckpt",
+        status="ok",
+        error=None,
+    )
+
+
+def _make_failed(trial_id: str) -> TrialResult:
+    return TrialResult(
+        trial_id=trial_id,
+        emb_dim=8,
+        hidden_size=32,
+        num_layers=1,
+        dropout=0.0,
+        lr=0.001,
+        batch_size=32,
+        val_loss=math.nan,
+        val_pr_auc=math.nan,
+        val_roc_auc=None,
+        n_params=None,
+        checkpoint_path=None,
+        status="failed",
+        error="RuntimeError: something went wrong",
+    )
+
+
+def test_rank_trials_higher_pr_auc_ranks_first() -> None:
+    """The trial with higher val_pr_auc must rank first."""
+    from yield_risk.sequence_sweep import rank_trials
+
+    low = _make_ok("trial_001", val_pr_auc=0.70, val_loss=0.5)
+    high = _make_ok("trial_002", val_pr_auc=0.90, val_loss=0.5)
+    ranked = rank_trials([low, high])
+    assert ranked[0].trial_id == "trial_002"
+    assert ranked[1].trial_id == "trial_001"
+
+
+def test_rank_trials_equal_pr_auc_lower_loss_wins() -> None:
+    """When val_pr_auc is equal, the trial with lower val_loss ranks first."""
+    from yield_risk.sequence_sweep import rank_trials
+
+    worse_loss = _make_ok("trial_001", val_pr_auc=0.80, val_loss=0.9)
+    better_loss = _make_ok("trial_002", val_pr_auc=0.80, val_loss=0.3)
+    ranked = rank_trials([worse_loss, better_loss])
+    assert ranked[0].trial_id == "trial_002"
+    assert ranked[1].trial_id == "trial_001"
+
+
+def test_rank_trials_equal_pr_auc_equal_loss_smaller_params_wins() -> None:
+    """When val_pr_auc and val_loss are equal, smaller n_params ranks first."""
+    from yield_risk.sequence_sweep import rank_trials
+
+    large = _make_ok("trial_001", val_pr_auc=0.80, val_loss=0.5, n_params=500)
+    small = _make_ok("trial_002", val_pr_auc=0.80, val_loss=0.5, n_params=100)
+    ranked = rank_trials([large, small])
+    assert ranked[0].trial_id == "trial_002"
+    assert ranked[1].trial_id == "trial_001"
+
+
+def test_rank_trials_failed_always_below_successful() -> None:
+    """A failed trial ranks below every successful trial, even one with low PR-AUC."""
+    from yield_risk.sequence_sweep import rank_trials
+
+    low_auc_ok = _make_ok("trial_001", val_pr_auc=0.10, val_loss=9.9)
+    failed = _make_failed("trial_002")
+    ranked = rank_trials([failed, low_auc_ok])
+    assert ranked[0].trial_id == "trial_001"
+    assert ranked[1].trial_id == "trial_002"
+
+
+def test_rank_trials_nan_pr_auc_successful_below_real_but_above_failed() -> None:
+    """NaN val_pr_auc ok-trial ranks below real-valued ok-trials but above failed."""
+    from yield_risk.sequence_sweep import rank_trials
+
+    real_ok = _make_ok("trial_001", val_pr_auc=0.50, val_loss=0.5)
+    nan_ok = _make_ok("trial_002", val_pr_auc=math.nan, val_loss=0.5)
+    failed = _make_failed("trial_003")
+    ranked = rank_trials([failed, nan_ok, real_ok])
+    assert ranked[0].trial_id == "trial_001"
+    assert ranked[1].trial_id == "trial_002"
+    assert ranked[2].trial_id == "trial_003"
+
+
+def test_select_best_returns_top_trial() -> None:
+    """select_best returns the highest-ranked successful trial."""
+    from yield_risk.sequence_sweep import select_best
+
+    low = _make_ok("trial_001", val_pr_auc=0.70, val_loss=0.5)
+    high = _make_ok("trial_002", val_pr_auc=0.90, val_loss=0.5)
+    best = select_best([low, high])
+    assert best is not None
+    assert best.trial_id == "trial_002"
+
+
+def test_select_best_returns_none_when_all_failed() -> None:
+    """select_best returns None when every trial failed."""
+    from yield_risk.sequence_sweep import select_best
+
+    results = [_make_failed("trial_000"), _make_failed("trial_001")]
+    assert select_best(results) is None
+
+
+def test_select_best_returns_none_on_empty_list() -> None:
+    """select_best returns None for an empty results list."""
+    from yield_risk.sequence_sweep import select_best
+
+    assert select_best([]) is None
+
+
+def test_rank_trials_does_not_mutate_input() -> None:
+    """rank_trials must return a new list and leave the input list unchanged."""
+    from yield_risk.sequence_sweep import rank_trials
+
+    a = _make_ok("trial_001", val_pr_auc=0.90, val_loss=0.5)
+    b = _make_ok("trial_002", val_pr_auc=0.70, val_loss=0.5)
+    original = [a, b]
+    original_copy = list(original)
+    result = rank_trials(original)
+    assert original == original_copy, "rank_trials mutated the input list"
+    assert result is not original, "rank_trials must return a new list"
