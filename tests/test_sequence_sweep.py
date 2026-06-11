@@ -1,6 +1,7 @@
 """Tests for the GRU hyperparameter sweep grid generator."""
 from __future__ import annotations
 
+import csv
 import json
 import math
 import re
@@ -527,3 +528,252 @@ def test_rank_trials_does_not_mutate_input() -> None:
     result = rank_trials(original)
     assert original == original_copy, "rank_trials mutated the input list"
     assert result is not original, "rank_trials must return a new list"
+
+
+# ---------------------------------------------------------------------------
+# write_sweep_results
+# ---------------------------------------------------------------------------
+
+_CSV_COLUMNS = [
+    "trial_id",
+    "emb_dim",
+    "hidden_size",
+    "num_layers",
+    "dropout",
+    "lr",
+    "batch_size",
+    "val_loss",
+    "val_pr_auc",
+    "val_roc_auc",
+    "n_params",
+    "checkpoint_path",
+    "status",
+    "error",
+]
+
+
+def _make_sweep_results() -> list[TrialResult]:
+    """Return three TrialResult objects for write_sweep_results tests."""
+    normal = TrialResult(
+        trial_id="trial_000",
+        emb_dim=8,
+        hidden_size=32,
+        num_layers=1,
+        dropout=0.0,
+        lr=0.001,
+        batch_size=32,
+        val_loss=0.45,
+        val_pr_auc=0.78,
+        val_roc_auc=0.82,
+        n_params=1234,
+        checkpoint_path="/models/trial_000/sequence_gru.pt",
+        status="ok",
+        error=None,
+    )
+    partial = TrialResult(
+        trial_id="trial_005",
+        emb_dim=16,
+        hidden_size=64,
+        num_layers=2,
+        dropout=0.1,
+        lr=0.0003,
+        batch_size=64,
+        val_loss=math.nan,
+        val_pr_auc=math.nan,
+        val_roc_auc=None,
+        n_params=5678,
+        checkpoint_path="/models/trial_005/sequence_gru.pt",
+        status="ok",
+        error=None,
+    )
+    failed = TrialResult(
+        trial_id="trial_099",
+        emb_dim=32,
+        hidden_size=128,
+        num_layers=2,
+        dropout=0.3,
+        lr=0.001,
+        batch_size=32,
+        val_loss=math.nan,
+        val_pr_auc=math.nan,
+        val_roc_auc=None,
+        n_params=None,
+        checkpoint_path=None,
+        status="failed",
+        error="RuntimeError: out of memory",
+    )
+    return [normal, partial, failed]
+
+
+def test_write_sweep_results_creates_both_files(tmp_path: Path) -> None:
+    """write_sweep_results creates both JSON and CSV output files."""
+    from yield_risk.sequence_sweep import write_sweep_results
+
+    ranked = _make_sweep_results()
+    write_sweep_results(ranked, tmp_path)
+
+    assert (tmp_path / "sequence_sweep_results.json").exists()
+    assert (tmp_path / "sequence_sweep_results.csv").exists()
+
+
+def test_write_sweep_results_json_structure(tmp_path: Path) -> None:
+    """JSON output: array, one object per trial, order preserved, 14 keys each."""
+    from yield_risk.sequence_sweep import write_sweep_results
+
+    ranked = _make_sweep_results()
+    write_sweep_results(ranked, tmp_path)
+
+    data = json.loads((tmp_path / "sequence_sweep_results.json").read_text())
+
+    assert isinstance(data, list)
+    assert len(data) == 3
+
+    # Order preserved
+    assert data[0]["trial_id"] == "trial_000"
+    assert data[1]["trial_id"] == "trial_005"
+    assert data[2]["trial_id"] == "trial_099"
+
+    # All 14 keys present on every record
+    for record in data:
+        assert set(record.keys()) == set(_CSV_COLUMNS)
+
+
+def test_write_sweep_results_json_nan_serialized_as_null(tmp_path: Path) -> None:
+    """NaN val_loss and val_pr_auc serialize as JSON null (Python None after parse)."""
+    from yield_risk.sequence_sweep import write_sweep_results
+
+    ranked = _make_sweep_results()
+    write_sweep_results(ranked, tmp_path)
+
+    data = json.loads((tmp_path / "sequence_sweep_results.json").read_text())
+
+    # partial (index 1) has NaN val_loss and val_pr_auc
+    assert data[1]["val_loss"] is None
+    assert data[1]["val_pr_auc"] is None
+
+    # failed (index 2) also has NaN floats and None checkpoint/n_params
+    assert data[2]["val_loss"] is None
+    assert data[2]["val_pr_auc"] is None
+    assert data[2]["checkpoint_path"] is None
+    assert data[2]["n_params"] is None
+    assert data[2]["error"] == "RuntimeError: out of memory"
+
+
+def test_write_sweep_results_json_normal_row_values(tmp_path: Path) -> None:
+    """Normal ok trial values round-trip correctly through JSON."""
+    from yield_risk.sequence_sweep import write_sweep_results
+
+    ranked = _make_sweep_results()
+    write_sweep_results(ranked, tmp_path)
+
+    data = json.loads((tmp_path / "sequence_sweep_results.json").read_text())
+    rec = data[0]
+
+    assert rec["trial_id"] == "trial_000"
+    assert rec["emb_dim"] == 8
+    assert rec["hidden_size"] == 32
+    assert rec["num_layers"] == 1
+    assert rec["dropout"] == 0.0
+    assert rec["lr"] == 0.001
+    assert rec["batch_size"] == 32
+    assert rec["val_loss"] == pytest.approx(0.45)
+    assert rec["val_pr_auc"] == pytest.approx(0.78)
+    assert rec["val_roc_auc"] == pytest.approx(0.82)
+    assert rec["n_params"] == 1234
+    assert rec["checkpoint_path"] == "/models/trial_000/sequence_gru.pt"
+    assert rec["status"] == "ok"
+    assert rec["error"] is None
+
+
+def test_write_sweep_results_csv_header(tmp_path: Path) -> None:
+    """CSV header row matches the exact 14-column specification."""
+    from yield_risk.sequence_sweep import write_sweep_results
+
+    ranked = _make_sweep_results()
+    write_sweep_results(ranked, tmp_path)
+
+    with (tmp_path / "sequence_sweep_results.csv").open(newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader)
+
+    assert header == _CSV_COLUMNS
+
+
+def test_write_sweep_results_csv_row_order(tmp_path: Path) -> None:
+    """CSV rows appear in the same order as the input ranked list."""
+    from yield_risk.sequence_sweep import write_sweep_results
+
+    ranked = _make_sweep_results()
+    write_sweep_results(ranked, tmp_path)
+
+    with (tmp_path / "sequence_sweep_results.csv").open(newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    assert len(rows) == 3
+    assert rows[0]["trial_id"] == "trial_000"
+    assert rows[1]["trial_id"] == "trial_005"
+    assert rows[2]["trial_id"] == "trial_099"
+
+
+def test_write_sweep_results_csv_nan_and_none_as_empty_string(tmp_path: Path) -> None:
+    """NaN floats and None values render as empty strings in CSV."""
+    from yield_risk.sequence_sweep import write_sweep_results
+
+    ranked = _make_sweep_results()
+    write_sweep_results(ranked, tmp_path)
+
+    with (tmp_path / "sequence_sweep_results.csv").open(newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    # partial (index 1): NaN val_loss and val_pr_auc, None val_roc_auc
+    assert rows[1]["val_loss"] == ""
+    assert rows[1]["val_pr_auc"] == ""
+    assert rows[1]["val_roc_auc"] == ""
+
+    # failed (index 2): None checkpoint_path, None n_params
+    assert rows[2]["checkpoint_path"] == ""
+    assert rows[2]["n_params"] == ""
+    assert rows[2]["error"] == "RuntimeError: out of memory"
+
+
+def test_write_sweep_results_csv_normal_row_values(tmp_path: Path) -> None:
+    """Normal ok trial values are written correctly to CSV."""
+    from yield_risk.sequence_sweep import write_sweep_results
+
+    ranked = _make_sweep_results()
+    write_sweep_results(ranked, tmp_path)
+
+    with (tmp_path / "sequence_sweep_results.csv").open(newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    row = rows[0]
+    assert row["trial_id"] == "trial_000"
+    assert row["emb_dim"] == "8"
+    assert row["hidden_size"] == "32"
+    assert row["num_layers"] == "1"
+    assert row["dropout"] == "0.0"
+    assert row["lr"] == "0.001"
+    assert row["batch_size"] == "32"
+    assert float(row["val_loss"]) == pytest.approx(0.45)
+    assert float(row["val_pr_auc"]) == pytest.approx(0.78)
+    assert float(row["val_roc_auc"]) == pytest.approx(0.82)
+    assert row["n_params"] == "1234"
+    assert row["checkpoint_path"] == "/models/trial_000/sequence_gru.pt"
+    assert row["status"] == "ok"
+    assert row["error"] == ""
+
+
+def test_write_sweep_results_creates_reports_dir_if_missing(tmp_path: Path) -> None:
+    """write_sweep_results creates reports_dir when it does not exist."""
+    from yield_risk.sequence_sweep import write_sweep_results
+
+    reports_dir = tmp_path / "new_reports"
+    assert not reports_dir.exists()
+
+    write_sweep_results(_make_sweep_results(), reports_dir)
+
+    assert (reports_dir / "sequence_sweep_results.json").exists()
+    assert (reports_dir / "sequence_sweep_results.csv").exists()

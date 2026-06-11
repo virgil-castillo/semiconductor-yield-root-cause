@@ -19,6 +19,7 @@ and deterministic across runs.
 """
 from __future__ import annotations
 
+import csv
 import dataclasses
 import json
 import math
@@ -38,6 +39,7 @@ from yield_risk.sequence_models import (
 from yield_risk.sequence_train import (
     PreparedData,
     TrainConfig,
+    _json_safe,
     compute_sequence_metrics,
     save_checkpoint,
     train,
@@ -285,6 +287,106 @@ def _val_roc_auc(
     if math.isnan(roc):
         return None
     return float(roc)
+
+
+_SWEEP_CSV_COLUMNS: list[str] = [
+    "trial_id",
+    "emb_dim",
+    "hidden_size",
+    "num_layers",
+    "dropout",
+    "lr",
+    "batch_size",
+    "val_loss",
+    "val_pr_auc",
+    "val_roc_auc",
+    "n_params",
+    "checkpoint_path",
+    "status",
+    "error",
+]
+
+
+def write_sweep_results(ranked: list[TrialResult], reports_dir: Path) -> None:
+    """Write ranked sweep results as JSON and CSV into ``reports_dir``.
+
+    Both files are written in the order of ``ranked`` — the caller is
+    responsible for sorting (typically the output of ``rank_trials``).
+
+    Args:
+        ranked: Ordered list of ``TrialResult`` objects to serialize.
+        reports_dir: Directory for the output files; created if absent.
+
+    Returns:
+        None.  Side-effects: writes ``sequence_sweep_results.json`` and
+        ``sequence_sweep_results.csv`` under ``reports_dir``.
+    """
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    def _cell(value: object) -> object:
+        """Return empty string for None or NaN, otherwise the value.
+
+        Args:
+            value: A scalar value.
+
+        Returns:
+            ``""`` if ``value`` is ``None`` or a ``nan`` float, else ``value``.
+        """
+        if value is None:
+            return ""
+        if isinstance(value, float) and math.isnan(value):
+            return ""
+        return value
+
+    # --- JSON ---
+    payload: list[dict[str, object]] = []
+    for r in ranked:
+        payload.append(
+            {
+                "trial_id": r.trial_id,
+                "emb_dim": r.emb_dim,
+                "hidden_size": r.hidden_size,
+                "num_layers": r.num_layers,
+                "dropout": r.dropout,
+                "lr": r.lr,
+                "batch_size": r.batch_size,
+                "val_loss": _json_safe(r.val_loss),
+                "val_pr_auc": _json_safe(r.val_pr_auc),
+                "val_roc_auc": r.val_roc_auc,
+                "n_params": r.n_params,
+                "checkpoint_path": r.checkpoint_path,
+                "status": r.status,
+                "error": r.error,
+            }
+        )
+    (reports_dir / "sequence_sweep_results.json").write_text(
+        json.dumps(payload, indent=2)
+    )
+
+    # --- CSV ---
+    csv_path = reports_dir / "sequence_sweep_results.csv"
+    with csv_path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(_SWEEP_CSV_COLUMNS)
+        for r in ranked:
+            writer.writerow(
+                [
+                    _cell(r.trial_id),
+                    _cell(r.emb_dim),
+                    _cell(r.hidden_size),
+                    _cell(r.num_layers),
+                    _cell(r.dropout),
+                    _cell(r.lr),
+                    _cell(r.batch_size),
+                    _cell(r.val_loss),
+                    _cell(r.val_pr_auc),
+                    _cell(r.val_roc_auc),
+                    _cell(r.n_params),
+                    _cell(r.checkpoint_path),
+                    _cell(r.status),
+                    _cell(r.error),
+                ]
+            )
 
 
 def run_trial(
