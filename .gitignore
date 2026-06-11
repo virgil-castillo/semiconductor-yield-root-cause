@@ -25,6 +25,7 @@ models/*.pkl
 models/*.joblib
 models/*.json
 models/*.bin
+models/*.pt
 
 # Reports — keep markdown, ignore generated figures
 reports/figures/*.png
@@ -33,6 +34,8 @@ reports/figures/*.pdf
 reports/figures/*.html
 reports/*.npz
 reports/batch_scores.csv
+reports/sequence_*.json
+reports/sequence_model_comparison.csv
 
 # Jupyter
 .ipynb_checkpoints/
