@@ -211,6 +211,71 @@ The winner's validation PR-AUC (0.332) collapses to 0.185 on test — a drop of
 
 ---
 
+## Known limitation: windowing was held fixed and never evaluated
+
+This first sweep tuned the architecture while holding the most sequence-specific
+knob constant. Two consequences:
+
+- **`window_sizes` was not swept.** All 108 trials used the fixed augmentation
+  set `(64, 128, 256, 512)` (clipping to ~474 retained sensors). The grid never
+  explored whether a different prefix-augmentation set trains a better model — a
+  lever plausibly as impactful as `hidden_size`.
+- **Every trial — including the winner's test eval — was scored on the full
+  row.** The prefix design's headline capability (*current-window scoring*:
+  predicting from only the first *k* sensors, per
+  [`sequence_model.md`](sequence_model.md)) was never measured. We do not know
+  how gracefully these models degrade on partial sensor windows.
+
+The full-row test numbers above remain a fair architecture-vs-architecture
+comparison (the tabular models also use all features). But the windowing question
+is open, so we ran a follow-up **eval-time window sweep**.
+
+### Window sweep results
+
+`scripts/run_window_sweep.py` scores selected top checkpoints across a grid of
+`--window-size` values (first *N* raw sensor columns) on the test split and
+writes `reports/sequence_window_sweep_results.csv`. No model is retrained. Three
+distinct hyperparameter families were used: `trial_025` (shallow + fast),
+`trial_028` (deep + fast), `trial_031` (deep + slow, least overfit).
+
+Test PR-AUC by window (bold = best window per family; `full` is the ~474-sensor
+retained row used everywhere in the main sweep):
+
+| Family | 64 | 128 | 256 | 384 | 512 | full |
+|---|---|---|---|---|---|---|
+| trial_025 (shallow+fast) | 0.076 | 0.211 | **0.214** | 0.167 | 0.190 | 0.185 |
+| trial_028 (deep+fast) | 0.088 | **0.184** | 0.123 | 0.117 | 0.129 | 0.156 |
+| trial_031 (deep+slow) | 0.095 | 0.107 | **0.174** | 0.165 | 0.124 | 0.136 |
+
+Findings:
+
+1. **Window is a real lever.** For `trial_025` it swings test PR-AUC from 0.076
+   (at 64) to 0.214 (at 256) — a larger range than any *hyperparameter* moved in
+   the main sweep.
+2. **Full-row scoring is sub-optimal for all three families.** Every family peaks
+   at a *partial* window (256, 128, 256), not the full row. The headline 0.185
+   for the winner understates what its weights can do — at window 256 it reaches
+   0.214 and edges past random_forest's test PR-AUC (0.193).
+3. **Very short windows starve the model.** 64 sensors is uniformly poor
+   (PR-AUC ~0.08, ROC-AUC ~0.51–0.60); the sweet spot is mid-range (128–256).
+4. **`trial_031` is the better-behaved model.** Despite a lower PR-AUC, the
+   deep + slow (least overfit) family has by far the best recall (0.76–0.81 at
+   256+ vs ~0.24–0.62 for the others) and the highest GRU ROC-AUC (0.722 at 256,
+   approaching random_forest's 0.758). PR-AUC ranking alone hid this.
+
+**Critical caveat — do not read "256 is best" as a result.** Picking the window
+by its *test* PR-AUC is selection on the test set (the same multiplicity trap as
+choosing a model by test). The honest conclusion is narrower: *full-row is
+demonstrably not the optimal operating point, and window is a first-class lever
+the main sweep ignored.* To actually choose a window, select it on
+validation/CV and confirm on test once.
+
+A larger *training*-augmentation sweep (varying `window_sizes` and retraining
+each family, with window selected on validation) is the natural next step and
+remains a separate, heavier follow-up.
+
+---
+
 ## Recommendation
 
 - **Do not promote** the swept GRU to production. The selected tabular model
