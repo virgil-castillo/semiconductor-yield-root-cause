@@ -1,5 +1,11 @@
 # SDD Spec: Early-Detection Bayesian Optimization for SECOM
 
+> **Umbrella design doc.** Implemented as three slices, each its own spec:
+> - **A** — leakage-safe scoring core (no Optuna):
+>   [`2026-06-12-early-detection-a-scoring-core.md`](2026-06-12-early-detection-a-scoring-core.md) ← build + verify first
+> - **B** — Optuna search, CLI, study artifacts (wraps A) — *to be drafted*
+> - **C** — full-feature baseline, comparison, early-detection curve — *to be drafted*
+
 ## Goal
 
 Add an isolated experiment that treats ordered SECOM sensor columns as a
