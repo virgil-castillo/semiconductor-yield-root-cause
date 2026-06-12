@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import pandas as pd
+from lightgbm import LGBMClassifier
+from sklearn.base import ClassifierMixin
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from xgboost import XGBClassifier
 
 _VALID_ACCESS_TYPES = frozenset({"prefix", "window"})
 
@@ -118,6 +124,125 @@ def observation_fraction(access: SensorAccess, n_sensors: int) -> float:
         A value in ``(0, 1]``.
     """
     return latest_index(access, n_sensors) / n_sensors
+
+
+@dataclass(frozen=True)
+class HyperparamConfig:
+    """All hyperparameters for one early-detection scoring run.
+
+    A pure frozen dataclass — no validation logic beyond immutability.
+    Constructed directly by the caller (e.g. an Optuna objective).
+
+    Attributes:
+        access: Which sensors are observable at this production stage.
+        missing_threshold: Maximum fraction of missing values allowed per
+            column before that column is dropped.
+        variance_threshold: Minimum variance a column must have to survive
+            the variance filter.
+        correlation_threshold: Absolute Pearson correlation above which one
+            of a correlated pair is dropped.
+        selection_method: Feature selection strategy.  One of ``"none"``,
+            ``"univariate"``, ``"mutual_info"``, or ``"model_importance"``.
+        max_features: Number of top features to keep after selection.
+            ``None`` when ``selection_method == "none"``.
+        model_family: Classifier family.  One of
+            ``"logistic_regression"``, ``"random_forest"``, ``"xgboost"``,
+            or ``"lightgbm"``.
+        model_params: Hyperparameter overrides passed verbatim to
+            ``build_estimator``.
+        threshold_policy: Decision-threshold strategy.  Either ``"tune"``
+            or ``"far_constraint"``.
+        threshold: Decision threshold to apply.  Set iff
+            ``threshold_policy == "tune"``.
+        false_alarm_rate: Maximum tolerated false-alarm rate.  Set iff
+            ``threshold_policy == "far_constraint"``.
+    """
+
+    access: SensorAccess
+    missing_threshold: float
+    variance_threshold: float
+    correlation_threshold: float
+    selection_method: str
+    max_features: int | None
+    model_family: str
+    model_params: dict[str, object]
+    threshold_policy: str
+    threshold: float | None
+    false_alarm_rate: float | None
+
+
+def build_estimator(
+    model_family: str,
+    model_params: dict[str, object],
+    random_seed: int,
+) -> ClassifierMixin:
+    """Return a seeded sklearn-compatible classifier for the given family.
+
+    Applies the family's fixed defaults, then overlays everything in
+    ``model_params`` (``model_params`` wins on conflict). ``random_seed``
+    seeds the estimator.
+
+    For ``xgboost`` and ``lightgbm``, ``scale_pos_weight`` is honoured if
+    present in ``model_params``; otherwise the library default is used.
+
+    Args:
+        model_family: One of ``"logistic_regression"``, ``"random_forest"``,
+            ``"xgboost"``, or ``"lightgbm"``.
+        model_params: Hyperparameter overrides applied on top of family
+            defaults. Any key valid for the underlying estimator is accepted.
+        random_seed: Random state for the estimator.
+
+    Returns:
+        An unfitted sklearn-compatible classifier exposing ``fit`` and
+        ``predict_proba``.
+
+    Raises:
+        ValueError: If ``model_family`` is not one of the four supported
+            families.
+    """
+    if model_family == "logistic_regression":
+        defaults: dict[str, Any] = {
+            "class_weight": "balanced",
+            "solver": "lbfgs",
+            "max_iter": 1000,
+            "random_state": random_seed,
+        }
+        defaults.update(model_params)
+        return LogisticRegression(**defaults)
+
+    if model_family == "random_forest":
+        defaults = {
+            "class_weight": "balanced",
+            "random_state": random_seed,
+            "n_jobs": 1,
+        }
+        defaults.update(model_params)
+        return RandomForestClassifier(**defaults)
+
+    if model_family == "xgboost":
+        defaults = {
+            "eval_metric": "logloss",
+            "tree_method": "hist",
+            "random_state": random_seed,
+            "n_jobs": 1,
+        }
+        defaults.update(model_params)
+        return XGBClassifier(**defaults)
+
+    if model_family == "lightgbm":
+        defaults = {
+            "random_state": random_seed,
+            "n_jobs": 1,
+            "verbose": -1,
+        }
+        defaults.update(model_params)
+        return LGBMClassifier(**defaults)
+
+    raise ValueError(
+        f"Unknown model_family {model_family!r}. "
+        "Expected one of 'logistic_regression', 'random_forest', "
+        "'xgboost', 'lightgbm'."
+    )
 
 
 def select_ordered_sensors(

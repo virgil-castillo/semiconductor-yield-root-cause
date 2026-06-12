@@ -208,3 +208,227 @@ def test_select_ordered_sensors_window_start_out_of_range() -> None:
     access = SensorAccess(access_type="window", window_start=10, window_size=2)
     with pytest.raises(ValueError, match="window_start"):
         select_ordered_sensors(df, RAW_COLS, access)
+
+
+# ---------------------------------------------------------------------------
+# HyperparamConfig dataclass
+# ---------------------------------------------------------------------------
+
+
+def test_hyperparam_config_is_frozen_dataclass() -> None:
+    """HyperparamConfig is a frozen dataclass — fields are immutable."""
+    from yield_risk.early_detection import HyperparamConfig
+
+    access = SensorAccess(access_type="prefix", prefix_end=5)
+    cfg = HyperparamConfig(
+        access=access,
+        missing_threshold=0.5,
+        variance_threshold=0.01,
+        correlation_threshold=0.95,
+        selection_method="none",
+        max_features=None,
+        model_family="random_forest",
+        model_params={},
+        threshold_policy="tune",
+        threshold=0.5,
+        false_alarm_rate=None,
+    )
+    with pytest.raises(Exception):
+        cfg.model_family = "xgboost"  # type: ignore[misc]
+
+
+def test_hyperparam_config_stores_all_fields() -> None:
+    """HyperparamConfig stores all provided field values correctly."""
+    from yield_risk.early_detection import HyperparamConfig
+
+    access = SensorAccess(access_type="window", window_start=2, window_size=4)
+    cfg = HyperparamConfig(
+        access=access,
+        missing_threshold=0.3,
+        variance_threshold=0.005,
+        correlation_threshold=0.9,
+        selection_method="univariate",
+        max_features=10,
+        model_family="xgboost",
+        model_params={"scale_pos_weight": 5.0},
+        threshold_policy="far_constraint",
+        threshold=None,
+        false_alarm_rate=0.05,
+    )
+    assert cfg.access is access
+    assert cfg.missing_threshold == 0.3
+    assert cfg.variance_threshold == 0.005
+    assert cfg.correlation_threshold == 0.9
+    assert cfg.selection_method == "univariate"
+    assert cfg.max_features == 10
+    assert cfg.model_family == "xgboost"
+    assert cfg.model_params == {"scale_pos_weight": 5.0}
+    assert cfg.threshold_policy == "far_constraint"
+    assert cfg.threshold is None
+    assert cfg.false_alarm_rate == 0.05
+
+
+# ---------------------------------------------------------------------------
+# build_estimator — helper toy data
+# ---------------------------------------------------------------------------
+
+import numpy as np  # noqa: E402
+
+
+def _toy_xy(seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    """Return a small 2-class toy dataset that is clearly separable."""
+    rng = np.random.default_rng(seed)
+    X0 = rng.normal(loc=-3.0, scale=0.5, size=(30, 4))
+    X1 = rng.normal(loc=3.0, scale=0.5, size=(30, 4))
+    X = np.vstack([X0, X1])
+    y = np.array([0] * 30 + [1] * 30)
+    return X, y
+
+
+# ---------------------------------------------------------------------------
+# build_estimator — fit + predict_proba shape for each family
+# ---------------------------------------------------------------------------
+
+
+def test_build_estimator_logistic_regression_shape() -> None:
+    """build_estimator logistic_regression: predict_proba yields shape (n, 2)."""
+    from yield_risk.early_detection import build_estimator
+
+    X, y = _toy_xy()
+    est = build_estimator("logistic_regression", {}, random_seed=0)
+    assert callable(est.fit)
+    assert callable(est.predict_proba)
+    est.fit(X, y)
+    proba = est.predict_proba(X)
+    assert proba.shape == (len(y), 2)
+
+
+def test_build_estimator_random_forest_shape() -> None:
+    """build_estimator random_forest: predict_proba yields shape (n, 2)."""
+    from yield_risk.early_detection import build_estimator
+
+    X, y = _toy_xy()
+    est = build_estimator("random_forest", {}, random_seed=0)
+    assert callable(est.fit)
+    assert callable(est.predict_proba)
+    est.fit(X, y)
+    proba = est.predict_proba(X)
+    assert proba.shape == (len(y), 2)
+
+
+def test_build_estimator_xgboost_shape() -> None:
+    """build_estimator xgboost: predict_proba yields shape (n, 2)."""
+    from yield_risk.early_detection import build_estimator
+
+    X, y = _toy_xy()
+    est = build_estimator("xgboost", {}, random_seed=0)
+    assert callable(est.fit)
+    assert callable(est.predict_proba)
+    est.fit(X, y)
+    proba = est.predict_proba(X)
+    assert proba.shape == (len(y), 2)
+
+
+def test_build_estimator_lightgbm_shape() -> None:
+    """build_estimator lightgbm: predict_proba yields shape (n, 2)."""
+    from yield_risk.early_detection import build_estimator
+
+    X, y = _toy_xy()
+    est = build_estimator("lightgbm", {}, random_seed=0)
+    assert callable(est.fit)
+    assert callable(est.predict_proba)
+    est.fit(X, y)
+    proba = est.predict_proba(X)
+    assert proba.shape == (len(y), 2)
+
+
+# ---------------------------------------------------------------------------
+# build_estimator — seeding determinism
+# ---------------------------------------------------------------------------
+
+
+def test_build_estimator_logistic_regression_determinism() -> None:
+    """Two logistic_regression estimators with the same seed produce identical proba."""
+    from yield_risk.early_detection import build_estimator
+
+    X, y = _toy_xy()
+    est1 = build_estimator("logistic_regression", {}, random_seed=42)
+    est2 = build_estimator("logistic_regression", {}, random_seed=42)
+    est1.fit(X, y)
+    est2.fit(X, y)
+    np.testing.assert_array_equal(est1.predict_proba(X), est2.predict_proba(X))
+
+
+def test_build_estimator_random_forest_determinism() -> None:
+    """Two random_forest estimators with the same seed produce identical proba."""
+    from yield_risk.early_detection import build_estimator
+
+    X, y = _toy_xy()
+    est1 = build_estimator("random_forest", {}, random_seed=42)
+    est2 = build_estimator("random_forest", {}, random_seed=42)
+    est1.fit(X, y)
+    est2.fit(X, y)
+    np.testing.assert_array_equal(est1.predict_proba(X), est2.predict_proba(X))
+
+
+def test_build_estimator_xgboost_determinism() -> None:
+    """Two xgboost estimators with the same seed produce identical proba."""
+    from yield_risk.early_detection import build_estimator
+
+    X, y = _toy_xy()
+    est1 = build_estimator("xgboost", {}, random_seed=42)
+    est2 = build_estimator("xgboost", {}, random_seed=42)
+    est1.fit(X, y)
+    est2.fit(X, y)
+    np.testing.assert_array_equal(est1.predict_proba(X), est2.predict_proba(X))
+
+
+def test_build_estimator_lightgbm_determinism() -> None:
+    """Two lightgbm estimators with the same seed produce identical proba."""
+    from yield_risk.early_detection import build_estimator
+
+    X, y = _toy_xy()
+    est1 = build_estimator("lightgbm", {}, random_seed=42)
+    est2 = build_estimator("lightgbm", {}, random_seed=42)
+    est1.fit(X, y)
+    est2.fit(X, y)
+    np.testing.assert_array_equal(est1.predict_proba(X), est2.predict_proba(X))
+
+
+# ---------------------------------------------------------------------------
+# build_estimator — model_params overlay
+# ---------------------------------------------------------------------------
+
+
+def test_build_estimator_model_params_overlay_random_forest() -> None:
+    """model_params overlay: random_forest respects n_estimators from params."""
+    from yield_risk.early_detection import build_estimator
+
+    est = build_estimator("random_forest", {"n_estimators": 7}, random_seed=0)
+    assert est.get_params()["n_estimators"] == 7
+
+
+# ---------------------------------------------------------------------------
+# build_estimator — scale_pos_weight passthrough for xgboost
+# ---------------------------------------------------------------------------
+
+
+def test_build_estimator_xgboost_scale_pos_weight_passthrough() -> None:
+    """scale_pos_weight in model_params is honored by xgboost estimator."""
+    from yield_risk.early_detection import build_estimator
+
+    est = build_estimator("xgboost", {"scale_pos_weight": 3.0}, random_seed=0)
+    assert est.get_params()["scale_pos_weight"] == 3.0
+
+
+# ---------------------------------------------------------------------------
+# build_estimator — unknown family raises ValueError
+# ---------------------------------------------------------------------------
+
+
+def test_build_estimator_unknown_family_raises_value_error() -> None:
+    """build_estimator raises ValueError for an unknown model_family."""
+    from yield_risk.early_detection import build_estimator
+
+    with pytest.raises(ValueError, match="model_family"):
+        build_estimator("neural_net", {}, random_seed=0)
