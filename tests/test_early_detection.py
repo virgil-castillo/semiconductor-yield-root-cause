@@ -875,6 +875,20 @@ def test_compute_detection_metric_roc_auc_matches_roc_auc_score() -> None:
     assert result == pytest.approx(expected)
 
 
+def test_compute_detection_metric_roc_auc_delegates_to_compute_metrics() -> None:
+    """roc_auc branch value equals compute_metrics(y_true, y_prob).roc_auc."""
+    from yield_risk.early_detection import compute_detection_metric
+    from yield_risk.evaluate import compute_metrics
+
+    y_true = np.array([0, 0, 1, 1, 0, 1])
+    y_prob = np.array([0.1, 0.3, 0.6, 0.8, 0.4, 0.9])
+    expected = compute_metrics(y_true, y_prob).roc_auc
+    result = compute_detection_metric(
+        y_true, y_prob, threshold=0.5, metric_name="roc_auc"
+    )
+    assert result == pytest.approx(expected)
+
+
 # ---------------------------------------------------------------------------
 # compute_detection_metric — recall_at_far
 # ---------------------------------------------------------------------------

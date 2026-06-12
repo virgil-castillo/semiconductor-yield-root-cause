@@ -20,16 +20,13 @@ from sklearn.feature_selection import (
     mutual_info_classif,
 )
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (
-    average_precision_score,
-    balanced_accuracy_score,
-    roc_auc_score,
-)
+from sklearn.metrics import balanced_accuracy_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 from yield_risk.config import CostMatrix
+from yield_risk.evaluate import compute_metrics
 from yield_risk.preprocess import (
     drop_high_correlation,
     drop_high_missing,
@@ -600,7 +597,7 @@ def compute_detection_metric(
                 stacklevel=2,
             )
             return float("nan")
-        return float(average_precision_score(y_true, y_prob))
+        return float(compute_metrics(y_true, y_prob).pr_auc)
 
     if metric_name == "roc_auc":
         if len(np.unique(y_true)) < 2:
@@ -610,7 +607,7 @@ def compute_detection_metric(
                 stacklevel=2,
             )
             return float("nan")
-        return float(roc_auc_score(y_true, y_prob))
+        return float(compute_metrics(y_true, y_prob).roc_auc)
 
     if metric_name == "recall_at_far":
         n_pos = int(np.sum(y_true == 1))
