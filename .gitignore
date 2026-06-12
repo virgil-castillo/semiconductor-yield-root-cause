@@ -26,6 +26,8 @@ models/*.joblib
 models/*.json
 models/*.bin
 models/*.pt
+# per-trial sweep checkpoints (binaries)
+models/sequence_sweep/
 
 # Reports — keep markdown, ignore generated figures
 reports/figures/*.png
@@ -34,6 +36,8 @@ reports/figures/*.pdf
 reports/figures/*.html
 reports/*.npz
 reports/batch_scores.csv
+# per-trial sweep training histories (keep ranked .csv summary)
+reports/sequence_sweep/
 reports/sequence_*.json
 reports/sequence_model_comparison.csv
 
