@@ -20,6 +20,12 @@ embeddings, adds predictive signal beyond flat tabular features. It makes no
 claim of true temporal structure in the data. Treat all results as
 exploratory.
 
+> **Outcome (closed):** the hypothesis did not hold. A 108-trial sweep plus a
+> window sweep confirmed the GRU trails the tabular models on test, and the
+> experiment is concluded as a negative result. See
+> [`gru_sweep_results.md`](gru_sweep_results.md) for the full analysis and the
+> next direction.
+
 ---
 
 ## Installation

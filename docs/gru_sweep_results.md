@@ -290,3 +290,32 @@ remains a separate, heavier follow-up.
   cross-validation or repeated seeds instead of a single noisy validation split
   for selection. Manage expectations: the cross-model gap suggests architecture,
   not tuning, is the limiting factor.
+
+---
+
+## Status: closed
+
+This branch (`feat/gru-sequence-model`) is **concluded as a negative result and
+will not be developed further.** Summary of the verdict:
+
+- The GRU is the weakest non-trivial model on test (PR-AUC 0.185 vs xgboost
+  0.261, random_forest 0.193). Tuning over 108 trials produced no test-set lift.
+- The positional pseudo-sequence is fabricated (SECOM column order is not process
+  order), so the sequence model has no real sequence to exploit — the most likely
+  reason it trails the trees. A sequence model only earns its complexity on data
+  with genuine temporal dynamics, which SECOM is not.
+- **Production models remain the tabular pipeline** (random_forest selected,
+  xgboost strongest). The GRU stays an isolated experiment.
+
+Known limitations left **unfixed** (deliberately, since the line is closed):
+
+- Sweep checkpoints are the *final* epoch, not the best — the models are overfit
+  (train loss ↓ while val loss ↑ after ~epoch 39). No early stopping was added.
+- The window sweep selected windows by test PR-AUC (illustrative, not a usable
+  selection rule). Any real window choice must be made on validation/CV.
+
+**Next direction (separate branch):** early fault detection from *partial*
+process data using per-stage tabular (tree) models, with a flattened-tree
+baseline that any future sequence model must beat. See the discussion in this
+branch's history for the rationale (step-vector framing, dynamics-must-carry-
+signal gate).
