@@ -17,43 +17,27 @@ hyperparameters, and threshold under a leakage-safe nested-CV protocol, then
 compares the winning early configuration against a full-feature baseline on one
 held-out test split.
 
-## Assumption (stated, not claimed from data)
+## Assumption
 
 This experiment **asserts raw SECOM column order as a stand-in for
-sensor-acquisition / fabrication progress.** This is a deliberate modeling
-assumption of the maintainer, **not** a property established from the dataset:
-the SECOM sensors are anonymized and carry no process-step, stage, or ordering
-metadata (`reports/data_card.md`), and the labels provide only pass/fail plus a
-per-wafer timestamp. "Earliness" throughout this spec therefore means *earlier
-in column order under this assumption* — it is not a verified claim about
-physical fabrication time. Results must be reported with this caveat; a prior
-GRU experiment hypothesized (but did not isolate) column-order ≠ process-order
-as one possible cause of its negative result.
+sensor-acquisition / fabrication progress** — a declared modeling choice, not a
+property of the data (sensors are anonymized with no stage/order metadata;
+`reports/data_card.md`). "Earliness" means earlier *in column order*; report
+results with this caveat.
 
-## Decisions pinned (resolved ambiguities)
+## Key choices (these resolve real ambiguities — the rest is left to the implementer)
 
-- **BO library: Optuna with the default `TPESampler`.** Already present in the
-  `mlops` env. Reasons: define-by-run conditional search space (the sampled
-  `access_type` gates which sensor-index params exist; model family gates which
-  hyperparameters exist), native categorical + integer + float params, study
-  persistence, and an `objective(trial)` signature matching the existing
-  pseudocode. Add `"optuna>=3.6"` to `pyproject.toml` `dependencies` and a
-  `[[tool.mypy.overrides]] module = "optuna.*" ignore_missing_imports = true`
-  block. **botorch / Ax / gpytorch / pymc / scikit-optimize are NOT used and
-  NOT installed** — GP-based BO handles this conditional/categorical space
-  poorly; pymc is an inference library, not an optimizer.
-- **Sequence/GRU family excluded.** The search space is tabular sklearn-style
-  families only. (Sequence experiment is a closed dead end.)
-- **Isolated module, namespaced artifacts.** Mirrors the GRU experiment
-  convention: this experiment MUST NOT modify the tabular pipeline modules,
+- **BO library: Optuna** (`TPESampler`). The `objective(trial)` pseudocode
+  assumes it, and the search space is conditional/categorical (which GP-based BO
+  handles poorly). Add `"optuna>=3.6"` to `pyproject.toml` and a `optuna.*`
+  mypy override. *(Used in Spec B, not Spec A.)*
+- **Outer protocol = single stratified train/test holdout** (`cfg.run.test_size`,
+  `cfg.run.random_seed`), **not** k-fold outer CV — the original brief was
+  contradictory here. The study runs on the train split; the test split is
+  touched once, for the final comparison.
+- **Isolated, additive only.** MUST NOT modify the tabular pipeline modules,
   `evaluate.ClassificationMetrics`, existing scripts, or any existing artifact
   in `models/` or `reports/`.
-- **Outer protocol = single stratified train/test holdout** (using
-  `cfg.run.test_size`, `cfg.run.random_seed`), not k-fold outer CV. The Optuna
-  study runs entirely on the train split; the test split is touched exactly
-  once, for the final early-model-vs-baseline comparison.
-- **Earliness penalty `alpha` default = 0.10**, configurable.
-- **Default `detection_metric` = PR-AUC** (average precision), configurable.
 
 ## New files (repo-relative)
 
@@ -72,9 +56,9 @@ Google-style docstrings with Args/Returns/Raises; full annotations; `mypy
 
 - `yield_risk.data.load_secom`, `yield_risk.validation.validate_secom`.
 - Cleaning decisions from `yield_risk.preprocess`: `drop_high_missing`,
-  `impute_median`, `drop_low_variance`, `drop_high_correlation`. As in the GRU
-  spec, do **not** call `run_preprocessing` (it materializes CSVs); apply these
-  fold-locally so every fit statistic comes from the train fold only.
+  `impute_median`, `drop_low_variance`, `drop_high_correlation`. Do **not** call
+  `run_preprocessing` (it materializes CSVs); apply these fold-locally so every
+  fit statistic comes from the train fold only.
 - `yield_risk.evaluate.compute_metrics` for `roc_auc`/`pr_auc`, and its plot
   helpers for figures.
 - `yield_risk.config.load_config` for paths/run params; `load_cost_config` only
@@ -228,8 +212,8 @@ false_alarm_rate: 0.10
 performance_tolerance: 0.05      # fraction of baseline primary metric
 curve_prefixes: [16, 32, 64, 128, 256, 512]
 ```
-Missing file → all defaults (do not raise, matching `load_sequence_config`).
-Unknown keys → `ValueError` listing them. CLI `--n-trials`, `--alpha`,
+Missing file → all defaults (do not raise). Unknown keys → `ValueError` listing
+them. CLI `--n-trials`, `--alpha`,
 `--detection-metric`, `--seed`, `--config` override individual values.
 
 ## Edge cases & gotchas
@@ -240,16 +224,14 @@ Unknown keys → `ValueError` listing them. CLI `--n-trials`, `--alpha`,
 - **Zero features survive** preprocessing/selection in a fold → that fold's
   metric is undefined; see infeasible handling below.
 - **Single-class val fold** (no positives or no negatives) → `pr_auc` /
-  `roc_auc` = `nan` (warn, do not let sklearn raise), consistent with the GRU
-  spec's single-class guard.
+  `roc_auc` = `nan` (warn, do not let sklearn raise).
 - **Infeasible trial** (every retained-feature count is 0, or fewer than 2
   inner folds produce a defined metric) → objective returns the floor constant
   `EARLY_DETECTION_FLOOR = -1.0` (below any feasible `pr_auc - alpha`), so TPE
   learns to avoid it. Do **not** raise `TrialPruned` (would drop the trial from
   the study and starve the sampler of the negative signal).
 - **NaN in raw sensors** → imputed with train-fold medians. **±inf** →
-  `ValueError("Sensor matrix contains infinite values")` (reuse GRU message
-  convention).
+  `ValueError("Sensor matrix contains infinite values")`.
 - **`n_sensors == 0`** (no `sensor_` columns) → `ValueError("No raw sensor_
   columns found")`; CLI exits 1.
 - **`scale == 0`** zero-variance column after slicing → `StandardScaler` sets
@@ -262,8 +244,7 @@ Unknown keys → `ValueError` listing them. CLI `--n-trials`, `--alpha`,
 - **Determinism**: `TPESampler(seed=sampler_seed)`, `StratifiedKFold(shuffle=
   True, random_state=cfg.run.random_seed)`, per-model seeds set; two runs with
   the same config produce the same best config and metrics.
-- **`nan` in JSON outputs** serialized as `null` (reuse GRU `_json_safe`
-  pattern).
+- **`nan` in JSON outputs** serialized as `null`.
 
 ## Acceptance
 

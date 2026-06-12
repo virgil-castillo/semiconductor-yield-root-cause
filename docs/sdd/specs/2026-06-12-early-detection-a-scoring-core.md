@@ -17,11 +17,8 @@ you verify on real SECOM before building anything on top of it.
 ## Assumption
 
 `observation_fraction` and the prefix/window slicing treat **raw SECOM column
-order as a stand-in for sensor-acquisition / fabrication progress**. This is a
-declared assumption of the experiment, not a fact derived from the data (SECOM
-sensors are anonymized with no stage/order metadata). "Earliness" means earlier
-*in column order* under this assumption. See the umbrella spec's Assumption
-section.
+order as a stand-in for fabrication progress** — a declared assumption, not a
+fact about the data. "Earliness" means earlier *in column order*.
 
 ## Scope
 
