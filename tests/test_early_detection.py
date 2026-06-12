@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -1010,3 +1011,555 @@ def test_compute_detection_metric_roc_auc_single_class_nan_warning() -> None:
             y_true, y_prob, threshold=0.5, metric_name="roc_auc"
         )
     assert math.isnan(result)
+
+
+# ---------------------------------------------------------------------------
+# Helpers for evaluate_config tests
+# ---------------------------------------------------------------------------
+
+_SECOM_RAW_DIR = Path("C:/Users/Virgil/Code/semiconductor-yield-root-cause/data/raw")
+_SECOM_FILES_PRESENT = (
+    (_SECOM_RAW_DIR / "secom.data").exists()
+    and (_SECOM_RAW_DIR / "secom_labels.data").exists()
+)
+
+
+def _make_eval_df(
+    n_rows: int = 120,
+    n_sensors: int = 20,
+    seed: int = 42,
+) -> tuple[pd.DataFrame, np.ndarray, list[str]]:
+    """Return synthetic DataFrame, y (30% positives), and sensor col names.
+
+    Args:
+        n_rows: Number of samples.
+        n_sensors: Number of sensor columns.
+        seed: RNG seed for reproducibility.
+
+    Returns:
+        Tuple of (DataFrame, y, raw_sensor_cols).
+    """
+    rng = np.random.default_rng(seed)
+    raw_sensor_cols = [f"sensor_{i:03d}" for i in range(n_sensors)]
+    data = {col: rng.standard_normal(n_rows) for col in raw_sensor_cols}
+    x = pd.DataFrame(data)
+    # ~30% positives, fixed seed
+    y = (rng.random(n_rows) < 0.30).astype(int)
+    return x, y, raw_sensor_cols
+
+
+def _make_eval_cfg(
+    access: SensorAccess,
+    model_family: str = "random_forest",
+    selection_method: str = "none",
+    max_features: int | None = None,
+    missing_threshold: float = 0.9,
+    variance_threshold: float = 0.0,
+    correlation_threshold: float = 1.0,
+    model_params: dict[str, object] | None = None,
+) -> HyperparamConfig:
+    """Return a HyperparamConfig for evaluate_config tests."""
+    return HyperparamConfig(
+        access=access,
+        missing_threshold=missing_threshold,
+        variance_threshold=variance_threshold,
+        correlation_threshold=correlation_threshold,
+        selection_method=selection_method,
+        max_features=max_features,
+        model_family=model_family,
+        model_params=model_params if model_params is not None else {},
+        threshold_policy="tune",
+        threshold=0.5,
+        false_alarm_rate=None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# evaluate_config — EARLY_DETECTION_FLOOR constant exists
+# ---------------------------------------------------------------------------
+
+
+def test_early_detection_floor_value() -> None:
+    """EARLY_DETECTION_FLOOR is -1.0."""
+    from yield_risk.early_detection import EARLY_DETECTION_FLOOR
+
+    assert EARLY_DETECTION_FLOOR == -1.0
+
+
+# ---------------------------------------------------------------------------
+# evaluate_config — ConfigScore dataclass
+# ---------------------------------------------------------------------------
+
+
+def test_config_score_fields() -> None:
+    """ConfigScore is a dataclass with the expected fields."""
+    from yield_risk.early_detection import ConfigScore
+
+    cs = ConfigScore(
+        penalized_score=0.5,
+        detection_metric=0.6,
+        observation_fraction=0.4,
+        n_features_selected=5.0,
+        feasible=True,
+        per_fold=[{"metric": 0.6, "n_features": 5.0, "threshold": 0.5}],
+    )
+    assert cs.penalized_score == 0.5
+    assert cs.detection_metric == 0.6
+    assert cs.observation_fraction == 0.4
+    assert cs.n_features_selected == 5.0
+    assert cs.feasible is True
+    assert len(cs.per_fold) == 1
+
+
+# ---------------------------------------------------------------------------
+# evaluate_config — up-front validation
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_config_empty_raw_sensor_cols_raises() -> None:
+    """evaluate_config raises ValueError when raw_sensor_cols is empty."""
+    from yield_risk.early_detection import evaluate_config
+
+    x, y, _ = _make_eval_df()
+    access = SensorAccess(access_type="prefix", prefix_end=5)
+    cfg = _make_eval_cfg(access)
+    with pytest.raises(ValueError, match="No raw sensor_ columns found"):
+        evaluate_config(
+            x, y, [],
+            cfg,
+            inner_cv_folds=3,
+            alpha=0.0,
+            detection_metric="pr_auc",
+            random_seed=0,
+        )
+
+
+def test_evaluate_config_inf_in_sensors_raises() -> None:
+    """evaluate_config raises ValueError when sensor matrix contains +/-inf."""
+    from yield_risk.early_detection import evaluate_config
+
+    x, y, raw_sensor_cols = _make_eval_df()
+    # Inject +inf into the sensor matrix
+    x = x.copy()
+    x.iloc[0, 0] = float("inf")
+    access = SensorAccess(access_type="prefix", prefix_end=5)
+    cfg = _make_eval_cfg(access)
+    with pytest.raises(ValueError, match="Sensor matrix contains infinite values"):
+        evaluate_config(
+            x, y, raw_sensor_cols,
+            cfg,
+            inner_cv_folds=3,
+            alpha=0.0,
+            detection_metric="pr_auc",
+            random_seed=0,
+        )
+
+
+def test_evaluate_config_neg_inf_in_sensors_raises() -> None:
+    """evaluate_config raises ValueError when sensor matrix contains -inf."""
+    from yield_risk.early_detection import evaluate_config
+
+    x, y, raw_sensor_cols = _make_eval_df()
+    x = x.copy()
+    x.iloc[5, 3] = float("-inf")
+    access = SensorAccess(access_type="prefix", prefix_end=5)
+    cfg = _make_eval_cfg(access)
+    with pytest.raises(ValueError, match="Sensor matrix contains infinite values"):
+        evaluate_config(
+            x, y, raw_sensor_cols,
+            cfg,
+            inner_cv_folds=3,
+            alpha=0.0,
+            detection_metric="pr_auc",
+            random_seed=0,
+        )
+
+
+# ---------------------------------------------------------------------------
+# evaluate_config — infeasibility floor (spec acceptance test 1)
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_config_infeasible_no_retained_features() -> None:
+    """Config yielding no retained features → feasible=False, score=-1.0, metric=nan.
+
+    Uses a variance_threshold so large that all sensor columns are dropped
+    in every fold, making the preprocessor empty and every fold invalid.
+    """
+    from yield_risk.early_detection import EARLY_DETECTION_FLOOR, evaluate_config
+
+    x, y, raw_sensor_cols = _make_eval_df(n_rows=120, n_sensors=20, seed=42)
+    access = SensorAccess(access_type="prefix", prefix_end=20)
+    # variance_threshold=1e10 will drop all columns (variance << 1e10)
+    cfg = _make_eval_cfg(access, variance_threshold=1e10)
+
+    result = evaluate_config(
+        x, y, raw_sensor_cols,
+        cfg,
+        inner_cv_folds=3,
+        alpha=0.1,
+        detection_metric="pr_auc",
+        random_seed=42,
+    )
+
+    assert result.feasible is False
+    assert result.penalized_score == EARLY_DETECTION_FLOOR
+    assert np.isnan(result.detection_metric)
+
+
+def test_evaluate_config_infeasible_fewer_than_two_valid_folds() -> None:
+    """Config with < 2 valid folds → feasible=False, score=-1.0, metric=nan.
+
+    We craft data where all val folds are single-class (only positives) so
+    pr_auc is undefined (returns nan) for every fold → < 2 valid → infeasible.
+    """
+    from yield_risk.early_detection import EARLY_DETECTION_FLOOR, evaluate_config
+
+    # Build data: all labels are 1 → every val fold is single-class
+    rng = np.random.default_rng(7)
+    n_rows = 60
+    n_sensors = 10
+    raw_sensor_cols = [f"sensor_{i:03d}" for i in range(n_sensors)]
+    x = pd.DataFrame(
+        {col: rng.standard_normal(n_rows) for col in raw_sensor_cols}
+    )
+    y = np.ones(n_rows, dtype=int)  # all positives → single-class every fold
+
+    access = SensorAccess(access_type="prefix", prefix_end=n_sensors)
+    cfg = _make_eval_cfg(access, model_family="random_forest")
+
+    result = evaluate_config(
+        x, y, raw_sensor_cols,
+        cfg,
+        inner_cv_folds=3,
+        alpha=0.1,
+        detection_metric="pr_auc",
+        random_seed=42,
+    )
+
+    assert result.feasible is False
+    assert result.penalized_score == EARLY_DETECTION_FLOOR
+    assert np.isnan(result.detection_metric)
+
+
+# ---------------------------------------------------------------------------
+# evaluate_config — single-class guard (spec acceptance test 2)
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_config_single_class_val_fold_no_raise() -> None:
+    """evaluate_config does NOT raise when a val fold is single-class.
+
+    Returns a ConfigScore. We construct data where some folds will have a
+    single-class val split. With very few positives (2 out of 60) and 5 folds,
+    at least one fold's val set will have no positives.
+    """
+    from yield_risk.early_detection import ConfigScore, evaluate_config
+
+    rng = np.random.default_rng(11)
+    n_rows = 60
+    n_sensors = 10
+    raw_sensor_cols = [f"sensor_{i:03d}" for i in range(n_sensors)]
+    x = pd.DataFrame(
+        {col: rng.standard_normal(n_rows) for col in raw_sensor_cols}
+    )
+    # Only 2 positives → some val folds will be single-class
+    y = np.zeros(n_rows, dtype=int)
+    y[0] = 1
+    y[1] = 1
+
+    access = SensorAccess(access_type="prefix", prefix_end=n_sensors)
+    cfg = _make_eval_cfg(access, model_family="random_forest")
+
+    # Must not raise
+    result = evaluate_config(
+        x, y, raw_sensor_cols,
+        cfg,
+        inner_cv_folds=5,
+        alpha=0.0,
+        detection_metric="pr_auc",
+        random_seed=0,
+    )
+
+    assert isinstance(result, ConfigScore)
+    # With only 2 positives across 5 folds, many folds will have nan metric
+    # But the call itself must not raise
+
+
+# ---------------------------------------------------------------------------
+# evaluate_config — earliness test (spec acceptance test 3)
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_config_alpha_penalizes_late_window() -> None:
+    """Raising alpha penalizes a late config (high obs_fraction) below an early one.
+
+    At low alpha: late.penalized_score >= early.penalized_score (late sees
+    all sensors including the informative ones → higher raw detection metric).
+    At high alpha: late.penalized_score < early.penalized_score (the penalty
+    alpha * obs_fraction dominates; late has obs_fraction=1.0 vs early=0.1).
+
+    Data construction: the last 10 of 20 sensors are strongly predictive of y;
+    the first 2 sensors are pure noise.  The "early" config sees only 2 sensors
+    (noise), the "late" config sees all 20 (signal + noise).
+    """
+    from yield_risk.early_detection import evaluate_config
+
+    rng = np.random.default_rng(2024)
+    n_rows = 120
+    n_sensors = 20
+    raw_sensor_cols = [f"sensor_{i:03d}" for i in range(n_sensors)]
+
+    # First 2 sensors: pure noise; sensors 10-19: carry signal
+    noise = rng.standard_normal((n_rows, n_sensors))
+    # Build y from the last 10 sensors: strong linear signal
+    signal = noise[:, 10:20].sum(axis=1)
+    y = (signal > np.median(signal)).astype(int)  # ~50% positives
+
+    # Overlay the informative sensors with clear separation
+    noise[:, 10:20] += y[:, None] * 2.0  # class 1 shifted up by 2
+    x = pd.DataFrame(noise, columns=raw_sensor_cols)
+
+    # Early config: only first 2 sensors (pure noise)
+    early_access = SensorAccess(access_type="prefix", prefix_end=2)
+    cfg_early = _make_eval_cfg(
+        early_access,
+        model_family="random_forest",
+        model_params={"n_estimators": 20},
+    )
+
+    # Late config: all 20 sensors (includes informative ones 10-19)
+    late_access = SensorAccess(access_type="prefix", prefix_end=n_sensors)
+    cfg_late = _make_eval_cfg(
+        late_access,
+        model_family="random_forest",
+        model_params={"n_estimators": 20},
+    )
+
+    common_kwargs: dict[str, object] = {
+        "x": x,
+        "y": y,
+        "raw_sensor_cols": raw_sensor_cols,
+        "inner_cv_folds": 3,
+        "detection_metric": "pr_auc",
+        "random_seed": 0,
+    }
+
+    # Low alpha=0: late should score > early (more sensors = more info)
+    low_alpha = 0.0
+    late_low = evaluate_config(cfg=cfg_late, alpha=low_alpha, **common_kwargs)  # type: ignore[arg-type]
+    early_low = evaluate_config(cfg=cfg_early, alpha=low_alpha, **common_kwargs)  # type: ignore[arg-type]
+
+    assert late_low.feasible, "Late config must be feasible at low alpha"
+    assert early_low.feasible, "Early config must be feasible at low alpha"
+    # Late sees informative sensors → higher detection metric
+    assert late_low.penalized_score > early_low.penalized_score, (
+        f"At alpha=0 expected late ({late_low.penalized_score:.3f}) > "
+        f"early ({early_low.penalized_score:.3f})"
+    )
+
+    # High alpha: the obs_fraction penalty should flip the ordering.
+    # late obs_fraction = 20/20 = 1.0, early obs_fraction = 2/20 = 0.1
+    # at alpha=2.0: late penalty = 2.0*1.0=2.0, early penalty = 2.0*0.1=0.2
+    high_alpha = 2.0
+    late_high = evaluate_config(cfg=cfg_late, alpha=high_alpha, **common_kwargs)  # type: ignore[arg-type]
+    early_high = evaluate_config(cfg=cfg_early, alpha=high_alpha, **common_kwargs)  # type: ignore[arg-type]
+
+    assert late_high.feasible
+    assert early_high.feasible
+    assert late_high.penalized_score < early_high.penalized_score, (
+        f"At alpha=2 expected late ({late_high.penalized_score:.3f}) < "
+        f"early ({early_high.penalized_score:.3f})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# evaluate_config — determinism (spec acceptance test 4)
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_config_determinism() -> None:
+    """Two evaluate_config calls with identical args return equal ConfigScore."""
+    from yield_risk.early_detection import evaluate_config
+
+    x, y, raw_sensor_cols = _make_eval_df(n_rows=120, n_sensors=20, seed=99)
+    access = SensorAccess(access_type="prefix", prefix_end=10)
+    cfg = _make_eval_cfg(
+        access,
+        model_family="random_forest",
+        model_params={"n_estimators": 10},
+    )
+
+    kwargs: dict[str, object] = {
+        "x": x,
+        "y": y,
+        "raw_sensor_cols": raw_sensor_cols,
+        "cfg": cfg,
+        "inner_cv_folds": 3,
+        "alpha": 0.1,
+        "detection_metric": "pr_auc",
+        "random_seed": 42,
+    }
+
+    r1 = evaluate_config(**kwargs)  # type: ignore[arg-type]
+    r2 = evaluate_config(**kwargs)  # type: ignore[arg-type]
+
+    # Compare scalar fields
+    if np.isnan(r1.detection_metric) and np.isnan(r2.detection_metric):
+        pass  # both nan is equal
+    else:
+        assert r1.detection_metric == pytest.approx(r2.detection_metric)
+
+    if np.isnan(r1.penalized_score) and np.isnan(r2.penalized_score):
+        pass
+    else:
+        assert r1.penalized_score == pytest.approx(r2.penalized_score)
+
+    assert r1.observation_fraction == r2.observation_fraction
+    assert r1.n_features_selected == pytest.approx(r2.n_features_selected)
+    assert r1.feasible == r2.feasible
+
+    # Compare per_fold lists
+    assert len(r1.per_fold) == len(r2.per_fold)
+    for fd1, fd2 in zip(r1.per_fold, r2.per_fold):
+        assert set(fd1.keys()) == set(fd2.keys())
+        for k in fd1:
+            v1, v2 = fd1[k], fd2[k]
+            if math.isnan(v1) and math.isnan(v2):
+                pass
+            else:
+                assert v1 == pytest.approx(v2), f"per_fold key {k!r}: {v1} != {v2}"
+
+
+# ---------------------------------------------------------------------------
+# evaluate_config — feasible result has correct fields
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_config_feasible_result_fields() -> None:
+    """A feasible evaluate_config result has correct per_fold list and field types."""
+    from yield_risk.early_detection import evaluate_config
+
+    x, y, raw_sensor_cols = _make_eval_df(n_rows=120, n_sensors=20, seed=1)
+    access = SensorAccess(access_type="prefix", prefix_end=10)
+    cfg = _make_eval_cfg(
+        access,
+        model_family="random_forest",
+        model_params={"n_estimators": 10},
+    )
+
+    result = evaluate_config(
+        x, y, raw_sensor_cols,
+        cfg,
+        inner_cv_folds=3,
+        alpha=0.1,
+        detection_metric="pr_auc",
+        random_seed=0,
+    )
+
+    assert isinstance(result.per_fold, list)
+    assert len(result.per_fold) == 3  # inner_cv_folds=3
+    for fold_dict in result.per_fold:
+        assert "metric" in fold_dict
+        assert "n_features" in fold_dict
+        assert "threshold" in fold_dict
+
+    if result.feasible:
+        assert np.isfinite(result.penalized_score)
+        # obs_fraction = 10/20 = 0.5
+        assert result.observation_fraction == pytest.approx(0.5)
+        # penalized_score = detection_metric - alpha * obs_fraction
+        assert result.penalized_score == pytest.approx(
+            result.detection_metric - 0.1 * result.observation_fraction
+        )
+
+
+# ---------------------------------------------------------------------------
+# evaluate_config — scale_pos_weight auto-injection for xgboost/lightgbm
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_config_xgboost_runs_without_scale_pos_weight() -> None:
+    """evaluate_config with xgboost and no scale_pos_weight runs without error."""
+    from yield_risk.early_detection import evaluate_config
+
+    x, y, raw_sensor_cols = _make_eval_df(n_rows=120, n_sensors=10, seed=3)
+    access = SensorAccess(access_type="prefix", prefix_end=10)
+    cfg = _make_eval_cfg(
+        access,
+        model_family="xgboost",
+        # No scale_pos_weight → evaluate_config should compute it automatically
+        model_params={"n_estimators": 5},
+    )
+
+    result = evaluate_config(
+        x, y, raw_sensor_cols,
+        cfg,
+        inner_cv_folds=3,
+        alpha=0.0,
+        detection_metric="pr_auc",
+        random_seed=0,
+    )
+
+    # Just confirm it returned a result without raising
+    from yield_risk.early_detection import ConfigScore
+
+    assert isinstance(result, ConfigScore)
+
+
+# ---------------------------------------------------------------------------
+# Real-data sanity check (skipped unless SECOM data present)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not _SECOM_FILES_PRESENT,
+    reason="manual real-data sanity check; requires SECOM data",
+)
+def test_real_data_sanity_check() -> None:
+    """Sanity check: full-prefix config on SECOM data yields finite, feasible PR-AUC.
+
+    Loads SECOM data, builds a full-range prefix config with no feature
+    selection, runs evaluate_config with 5 inner CV folds, and asserts that
+    the mean PR-AUC is in a loose neighbourhood of the tabular baseline (~0.19).
+    Range [0.10, 0.40] is intentionally wide — this is a wiring sanity check.
+    """
+    from yield_risk.data import load_secom
+    from yield_risk.early_detection import evaluate_config
+
+    df = load_secom(_SECOM_RAW_DIR)
+    raw_sensor_cols = [c for c in df.columns if c.startswith("sensor_")]
+    n_sensors = len(raw_sensor_cols)
+    y = df["label"].to_numpy(dtype=int)
+
+    access = SensorAccess(access_type="prefix", prefix_end=n_sensors)
+    cfg = HyperparamConfig(
+        access=access,
+        missing_threshold=0.5,
+        variance_threshold=0.0,
+        correlation_threshold=1.0,
+        selection_method="none",
+        max_features=None,
+        model_family="random_forest",
+        model_params={"n_estimators": 50},
+        threshold_policy="tune",
+        threshold=0.5,
+        false_alarm_rate=None,
+    )
+
+    result = evaluate_config(
+        df, y, raw_sensor_cols,
+        cfg,
+        inner_cv_folds=5,
+        alpha=0.0,
+        detection_metric="pr_auc",
+        random_seed=42,
+    )
+
+    assert result.feasible, "Expected feasible result on SECOM data"
+    assert np.isfinite(result.detection_metric), (
+        "Expected finite mean PR-AUC on SECOM data"
+    )
+    assert 0.10 < result.detection_metric < 0.40, (
+        f"Mean PR-AUC {result.detection_metric:.3f} outside expected range [0.10, 0.40]"
+    )

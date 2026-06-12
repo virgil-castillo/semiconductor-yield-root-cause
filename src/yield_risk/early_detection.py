@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import functools
+import math
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -24,6 +25,7 @@ from sklearn.metrics import (
     balanced_accuracy_score,
     roc_auc_score,
 )
+from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
@@ -633,3 +635,208 @@ def compute_detection_metric(
         "Expected one of 'pr_auc', 'roc_auc', 'recall_at_far', "
         "'neg_balanced_error', 'neg_expected_cost'."
     )
+
+
+# ---------------------------------------------------------------------------
+# ConfigScore and evaluate_config
+# ---------------------------------------------------------------------------
+
+EARLY_DETECTION_FLOOR: float = -1.0
+"""Score returned for infeasible configs (< 2 valid CV folds)."""
+
+
+@dataclass
+class ConfigScore:
+    """Aggregated result from one cross-validation evaluation of a HyperparamConfig.
+
+    Attributes:
+        penalized_score: ``detection_metric - alpha * observation_fraction``
+            when feasible; ``EARLY_DETECTION_FLOOR`` (-1.0) when infeasible.
+        detection_metric: Mean detection metric over valid CV folds; ``nan``
+            when no valid fold exists.
+        observation_fraction: Fraction of sensors observable at this stage
+            (window-position-based, not fold-dependent).
+        n_features_selected: Mean number of selected features across *valid*
+            folds.  ``0.0`` when no valid fold exists.
+        feasible: ``True`` when at least 2 folds produced a non-nan metric.
+        per_fold: One dict per CV fold with keys ``metric``, ``n_features``,
+            and ``threshold``.  Invalid folds record ``metric=nan``.
+    """
+
+    penalized_score: float
+    detection_metric: float
+    observation_fraction: float
+    n_features_selected: float
+    feasible: bool
+    per_fold: list[dict[str, float]] = field(default_factory=list)
+
+
+def evaluate_config(
+    x: pd.DataFrame,
+    y: np.ndarray,
+    raw_sensor_cols: list[str],
+    cfg: HyperparamConfig,
+    *,
+    inner_cv_folds: int,
+    alpha: float,
+    detection_metric: str,
+    random_seed: int,
+    cost_matrix: CostMatrix | None = None,
+) -> ConfigScore:
+    """Score a HyperparamConfig via stratified cross-validation.
+
+    Runs ``inner_cv_folds``-fold stratified CV over ``x`` and ``y``.  In each
+    fold, the training window is preprocessed with ``FoldPreprocessor``, a
+    classifier is trained, probabilities are predicted on the val fold, and
+    ``compute_detection_metric`` is called.  Folds where the preprocessor
+    yields no features (empty ``retained_cols`` or empty ``selected_idx``) are
+    marked invalid and do not contribute to the aggregate score.
+
+    The trial is infeasible when fewer than 2 folds are valid, in which case
+    ``penalized_score = EARLY_DETECTION_FLOOR`` and ``detection_metric = nan``
+    are returned without raising.
+
+    ``n_features_selected`` is the mean selected-feature count over *valid*
+    folds only (invalid folds contribute ``0`` features but are excluded from
+    this mean).
+
+    Args:
+        x: Full feature DataFrame.  Must contain all ``raw_sensor_cols``.
+        y: Binary class labels aligned with ``x``, shape ``(n,)``.
+        raw_sensor_cols: Ordered list of all raw sensor column names.
+        cfg: Hyperparameter configuration for this trial.
+        inner_cv_folds: Number of stratified CV folds.
+        alpha: Earliness penalty weight.  ``penalized_score = detection_metric
+            - alpha * observation_fraction``.
+        detection_metric: Metric name passed to ``compute_detection_metric``.
+        random_seed: Seed for ``StratifiedKFold``, ``FoldPreprocessor``, and
+            ``build_estimator`` to ensure full determinism.
+        cost_matrix: Required when ``detection_metric == "neg_expected_cost"``.
+
+    Returns:
+        A ``ConfigScore`` summarising the cross-validation result.
+
+    Raises:
+        ValueError: If ``raw_sensor_cols`` is empty, or if the sensor matrix
+            (``x[raw_sensor_cols]``) contains infinite values.
+    """
+    # --- Up-front validation -------------------------------------------------
+    if not raw_sensor_cols:
+        raise ValueError("No raw sensor_ columns found")
+
+    sensor_matrix = x[raw_sensor_cols]
+    if np.any(np.isinf(sensor_matrix.values)):
+        raise ValueError("Sensor matrix contains infinite values")
+
+    # --- Observation fraction (window-position-based, not fold-dependent) ---
+    obs_fraction = observation_fraction(cfg.access, len(raw_sensor_cols))
+
+    # --- Cross-validation ----------------------------------------------------
+    cv = StratifiedKFold(
+        n_splits=inner_cv_folds, shuffle=True, random_state=random_seed
+    )
+
+    per_fold_records: list[dict[str, float]] = []
+
+    for train_idx, val_idx in cv.split(x, y):
+        y_train: np.ndarray = y[train_idx]
+        y_val: np.ndarray = y[val_idx]
+
+        x_train = x.iloc[train_idx]
+        x_val = x.iloc[val_idx]
+
+        # Slice to the observable window
+        x_train_window, _ = select_ordered_sensors(x_train, raw_sensor_cols, cfg.access)
+        x_val_window, _ = select_ordered_sensors(x_val, raw_sensor_cols, cfg.access)
+
+        # Fit preprocessor on training window only
+        preprocessor = FoldPreprocessor.fit(
+            x_train_window, y_train, cfg, random_seed
+        )
+
+        # Invalid fold: empty preprocessor
+        if not preprocessor.retained_cols or len(preprocessor.selected_idx) == 0:
+            per_fold_records.append(
+                {"metric": float("nan"), "n_features": 0.0, "threshold": float("nan")}
+            )
+            continue
+
+        # Transform both splits
+        x_train_arr = preprocessor.transform(x_train_window)
+        x_val_arr = preprocessor.transform(x_val_window)
+
+        # A single-class training fold cannot produce meaningful probability
+        # estimates for the positive class — mark as invalid.
+        if len(np.unique(y_train)) < 2:
+            per_fold_records.append(
+                {"metric": float("nan"), "n_features": 0.0, "threshold": float("nan")}
+            )
+            continue
+
+        # Compute scale_pos_weight for xgboost/lightgbm when not explicitly set
+        if cfg.model_family in {"xgboost", "lightgbm"} and (
+            "scale_pos_weight" not in cfg.model_params
+        ):
+            n_pos = int(np.sum(y_train == 1))
+            n_neg = int(np.sum(y_train == 0))
+            spw: float = float(n_neg) / float(n_pos) if n_pos > 0 else 1.0
+            model_params: dict[str, object] = dict(cfg.model_params)
+            model_params["scale_pos_weight"] = spw
+        else:
+            model_params = dict(cfg.model_params)
+
+        estimator = build_estimator(cfg.model_family, model_params, random_seed)
+        estimator.fit(x_train_arr, y_train)
+        proba_out: np.ndarray = estimator.predict_proba(x_val_arr)
+        # Guard: if model only learned one class, treat fold as invalid
+        if proba_out.shape[1] < 2:
+            per_fold_records.append(
+                {"metric": float("nan"), "n_features": 0.0, "threshold": float("nan")}
+            )
+            continue
+        y_prob: np.ndarray = proba_out[:, 1]
+
+        threshold = resolve_threshold(y_val, y_prob, cfg)
+        metric = compute_detection_metric(
+            y_val, y_prob, threshold, detection_metric, cost_matrix
+        )
+
+        n_selected = float(len(preprocessor.selected_idx))
+        per_fold_records.append(
+            {"metric": metric, "n_features": n_selected, "threshold": threshold}
+        )
+
+    # --- Aggregate -----------------------------------------------------------
+    valid_metrics = [
+        fd["metric"] for fd in per_fold_records if not math.isnan(fd["metric"])
+    ]
+    n_valid = len(valid_metrics)
+    feasible = n_valid >= 2
+
+    if feasible:
+        mean_metric = float(np.mean(valid_metrics))
+        # n_features_selected: mean over valid folds only
+        valid_n_features = [
+            fd["n_features"]
+            for fd in per_fold_records
+            if not math.isnan(fd["metric"])
+        ]
+        mean_n_features = float(np.mean(valid_n_features)) if valid_n_features else 0.0
+        penalized = mean_metric - alpha * obs_fraction
+        return ConfigScore(
+            penalized_score=penalized,
+            detection_metric=mean_metric,
+            observation_fraction=obs_fraction,
+            n_features_selected=mean_n_features,
+            feasible=True,
+            per_fold=per_fold_records,
+        )
+    else:
+        return ConfigScore(
+            penalized_score=EARLY_DETECTION_FLOOR,
+            detection_metric=float("nan"),
+            observation_fraction=obs_fraction,
+            n_features_selected=0.0,
+            feasible=False,
+            per_fold=per_fold_records,
+        )
