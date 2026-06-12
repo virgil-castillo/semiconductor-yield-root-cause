@@ -75,11 +75,13 @@ flowchart TD
   D -->|train| E["Optuna study<br/>TPESampler(seed), n_trials"]
 
   subgraph trial["objective(trial) — one Optuna trial"]
+    direction TB
     F[sample sensor access] --> G[sample preprocessing + feature-selection cfg]
     G --> H[sample model family + hyperparameters]
     H --> I[sample threshold policy]
     I --> J["inner StratifiedKFold over train (inner_cv_folds)"]
     subgraph fold["per fold — leakage-safe (fit on train fold only)"]
+      direction TB
       J --> K[slice ordered sensor window: prefix_end or window_start:size]
       K --> L[fit cleaner+imputer+scaler on train fold]
       L --> M[fit feature selector on train fold]

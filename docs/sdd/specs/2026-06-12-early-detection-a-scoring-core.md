@@ -67,10 +67,10 @@ def select_ordered_sensors(
 - `select_ordered_sensors` returns the sliced DataFrame (sensor columns only,
   original names) and the ordered window column list.
 
-### 2. Configuration object (constructed directly in tests; Optuna fills it later)
+### 2. Per-trial hyperparameter bundle (constructed directly in tests; Optuna fills it in Spec B)
 ```python
 @dataclass(frozen=True)
-class EarlyConfig:
+class HyperparamConfig:
     access: SensorAccess
     missing_threshold: float
     variance_threshold: float
@@ -96,7 +96,7 @@ class FoldPreprocessor:
 
     @classmethod
     def fit(cls, x_train_window: pd.DataFrame, y_train: np.ndarray,
-            cfg: EarlyConfig) -> FoldPreprocessor: ...
+            cfg: HyperparamConfig) -> FoldPreprocessor: ...
     def transform(self, x_window: pd.DataFrame) -> np.ndarray: ...   # (n_rows, n_selected) float64
 ```
 - `fit` order on the **train fold only**: drop-high-missing → median impute →
@@ -117,7 +117,7 @@ class FoldPreprocessor:
 def build_estimator(model_family: str, model_params: dict[str, object],
                     random_seed: int) -> ClassifierMixin: ...
 def resolve_threshold(y_val: np.ndarray, y_prob: np.ndarray,
-                      cfg: EarlyConfig) -> float: ...
+                      cfg: HyperparamConfig) -> float: ...
 def compute_detection_metric(
     y_true: np.ndarray, y_prob: np.ndarray, threshold: float,
     metric_name: str, cost_matrix: CostMatrix | None = None) -> float: ...
@@ -148,7 +148,7 @@ class ConfigScore:
 
 def evaluate_config(
     x: pd.DataFrame, y: np.ndarray, raw_sensor_cols: list[str],
-    cfg: EarlyConfig, *, inner_cv_folds: int, alpha: float,
+    cfg: HyperparamConfig, *, inner_cv_folds: int, alpha: float,
     detection_metric: str, random_seed: int,
     cost_matrix: CostMatrix | None = None) -> ConfigScore: ...
 ```
