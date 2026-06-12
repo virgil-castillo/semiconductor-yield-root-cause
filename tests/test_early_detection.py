@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from yield_risk.early_detection import (
+    HyperparamConfig,
     SensorAccess,
     latest_index,
     observation_fraction,
@@ -432,3 +433,275 @@ def test_build_estimator_unknown_family_raises_value_error() -> None:
 
     with pytest.raises(ValueError, match="model_family"):
         build_estimator("neural_net", {}, random_seed=0)
+
+
+# ---------------------------------------------------------------------------
+# FoldPreprocessor helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_fold_cfg(
+    selection_method: str = "none",
+    max_features: int | None = None,
+    missing_threshold: float = 0.5,
+    variance_threshold: float = 0.0,
+    correlation_threshold: float = 1.0,
+    model_family: str = "random_forest",
+) -> HyperparamConfig:
+    """Return a HyperparamConfig for FoldPreprocessor tests."""
+    return HyperparamConfig(
+        access=SensorAccess(access_type="prefix", prefix_end=1),
+        missing_threshold=missing_threshold,
+        variance_threshold=variance_threshold,
+        correlation_threshold=correlation_threshold,
+        selection_method=selection_method,
+        max_features=max_features,
+        model_family=model_family,
+        model_params={},
+        threshold_policy="tune",
+        threshold=0.5,
+        false_alarm_rate=None,
+    )
+
+
+def _make_sensor_df(
+    n_rows: int = 40,
+    n_cols: int = 6,
+    seed: int = 7,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Return a small synthetic sensor DataFrame and binary labels.
+
+    Columns are named sensor_0 .. sensor_{n_cols-1}.
+    """
+    rng = np.random.default_rng(seed)
+    data = {f"sensor_{i}": rng.standard_normal(n_rows) for i in range(n_cols)}
+    df = pd.DataFrame(data)
+    y = (rng.random(n_rows) > 0.5).astype(int)
+    return df, y
+
+
+# ---------------------------------------------------------------------------
+# FoldPreprocessor — test 1: leakage boundary
+# ---------------------------------------------------------------------------
+
+
+def test_fold_preprocessor_fit_uses_only_train_rows() -> None:
+    """Fit statistics are identical whether val rows are present in the DataFrame.
+
+    This is the headline leakage test: fitting on x_full.iloc[train_idx] must
+    yield byte-identical statistics to fitting on x_train_only (the same rows
+    extracted to their own DataFrame).
+    """
+    from yield_risk.early_detection import FoldPreprocessor
+
+    df_full, y_full = _make_sensor_df(n_rows=40, n_cols=6, seed=7)
+    train_idx = list(range(30))
+    y_train = y_full[train_idx]
+
+    cfg = _make_fold_cfg(selection_method="univariate", max_features=4)
+
+    # Fit on a slice of the full df (val rows still exist in df_full)
+    fp_a = FoldPreprocessor.fit(df_full.iloc[train_idx], y_train, cfg, random_seed=0)
+
+    # Fit on an independent DataFrame holding exactly the same rows
+    x_train_only = df_full.iloc[train_idx].reset_index(drop=True)
+    fp_b = FoldPreprocessor.fit(x_train_only, y_train, cfg, random_seed=0)
+
+    assert fp_a.retained_cols == fp_b.retained_cols
+    assert fp_a.medians == fp_b.medians
+    np.testing.assert_array_equal(fp_a.scaler_mean, fp_b.scaler_mean)
+    np.testing.assert_array_equal(fp_a.scaler_scale, fp_b.scaler_scale)
+    np.testing.assert_array_equal(fp_a.selected_idx, fp_b.selected_idx)
+
+
+# ---------------------------------------------------------------------------
+# FoldPreprocessor — test 2: zero-variance scale → 1.0
+# ---------------------------------------------------------------------------
+
+
+def test_fold_preprocessor_zero_variance_scale_is_one() -> None:
+    """A constant column on the train fold gets scaler_scale entry of 1.0.
+
+    Transforming that column must produce finite values (no inf/nan).
+    """
+    from yield_risk.early_detection import FoldPreprocessor
+
+    rng = np.random.default_rng(99)
+    n = 20
+    data = {
+        "sensor_0": rng.standard_normal(n),
+        "sensor_1": np.full(n, 3.14),  # constant → zero variance
+        "sensor_2": rng.standard_normal(n),
+    }
+    df = pd.DataFrame(data)
+    y = (rng.random(n) > 0.5).astype(int)
+
+    cfg = _make_fold_cfg(selection_method="none", variance_threshold=0.0)
+    fp = FoldPreprocessor.fit(df, y, cfg, random_seed=0)
+
+    # sensor_1 should survive (variance == 0 is NOT strictly below 0.0)
+    assert "sensor_1" in fp.retained_cols
+    idx_const = fp.retained_cols.index("sensor_1")
+    assert fp.scaler_scale[idx_const] == pytest.approx(1.0)
+
+    out = fp.transform(df)
+    assert np.all(np.isfinite(out))
+
+
+# ---------------------------------------------------------------------------
+# FoldPreprocessor — test 3: selector methods
+# ---------------------------------------------------------------------------
+
+
+def test_fold_preprocessor_selector_none_keeps_all() -> None:
+    """selection_method='none' → selected_idx == arange(n_retained)."""
+    from yield_risk.early_detection import FoldPreprocessor
+
+    df, y = _make_sensor_df(n_rows=40, n_cols=6)
+    cfg = _make_fold_cfg(selection_method="none")
+    fp = FoldPreprocessor.fit(df, y, cfg, random_seed=0)
+
+    np.testing.assert_array_equal(
+        fp.selected_idx, np.arange(len(fp.retained_cols))
+    )
+
+
+def test_fold_preprocessor_selector_univariate_respects_max_features() -> None:
+    """selection_method='univariate' with max_features=k keeps min(k, n_retained)."""
+    from yield_risk.early_detection import FoldPreprocessor
+
+    df, y = _make_sensor_df(n_rows=40, n_cols=6)
+    k = 3
+    cfg = _make_fold_cfg(selection_method="univariate", max_features=k)
+    fp = FoldPreprocessor.fit(df, y, cfg, random_seed=0)
+
+    expected = min(k, len(fp.retained_cols))
+    assert len(fp.selected_idx) == expected
+
+
+def test_fold_preprocessor_selector_mutual_info_respects_max_features() -> None:
+    """selection_method='mutual_info' with max_features=k keeps min(k, n_retained)."""
+    from yield_risk.early_detection import FoldPreprocessor
+
+    df, y = _make_sensor_df(n_rows=40, n_cols=6)
+    k = 2
+    cfg = _make_fold_cfg(selection_method="mutual_info", max_features=k)
+    fp = FoldPreprocessor.fit(df, y, cfg, random_seed=0)
+
+    expected = min(k, len(fp.retained_cols))
+    assert len(fp.selected_idx) == expected
+
+
+def test_fold_preprocessor_selector_model_importance_bounded() -> None:
+    """selection_method='model_importance' keeps ≤ max_features and ≤ n_retained."""
+    from yield_risk.early_detection import FoldPreprocessor
+
+    df, y = _make_sensor_df(n_rows=40, n_cols=6)
+    max_f = 4
+    cfg = _make_fold_cfg(
+        selection_method="model_importance",
+        max_features=max_f,
+        model_family="random_forest",
+    )
+    fp = FoldPreprocessor.fit(df, y, cfg, random_seed=0)
+
+    assert len(fp.selected_idx) <= max_f
+    assert len(fp.selected_idx) <= len(fp.retained_cols)
+
+
+# ---------------------------------------------------------------------------
+# FoldPreprocessor — test 4: max_features > retained count → no raise
+# ---------------------------------------------------------------------------
+
+
+def test_fold_preprocessor_max_features_exceeds_retained_no_raise() -> None:
+    """max_features larger than n_retained does not raise; k is clamped."""
+    from yield_risk.early_detection import FoldPreprocessor
+
+    df, y = _make_sensor_df(n_rows=40, n_cols=4)
+    # max_features deliberately larger than n_cols
+    cfg = _make_fold_cfg(selection_method="univariate", max_features=999)
+    fp = FoldPreprocessor.fit(df, y, cfg, random_seed=0)  # must not raise
+
+    assert len(fp.selected_idx) == len(fp.retained_cols)
+
+
+# ---------------------------------------------------------------------------
+# FoldPreprocessor — test 5: transform uses saved stats
+# ---------------------------------------------------------------------------
+
+
+def test_fold_preprocessor_transform_shape_and_dtype() -> None:
+    """transform returns float64 array with shape (n_val, n_selected)."""
+    from yield_risk.early_detection import FoldPreprocessor
+
+    df, y = _make_sensor_df(n_rows=40, n_cols=6)
+    train_idx = list(range(30))
+    val_idx = list(range(30, 40))
+
+    cfg = _make_fold_cfg(selection_method="univariate", max_features=3)
+    fp = FoldPreprocessor.fit(df.iloc[train_idx], y[train_idx], cfg, random_seed=0)
+
+    out = fp.transform(df.iloc[val_idx])
+    assert out.shape == (len(val_idx), len(fp.selected_idx))
+    assert out.dtype == np.float64
+
+
+def test_fold_preprocessor_transform_uses_train_median_for_nan() -> None:
+    """A NaN in a val row retained column is filled with the TRAIN-fold median."""
+    from yield_risk.early_detection import FoldPreprocessor
+
+    rng = np.random.default_rng(42)
+    n = 30
+    sensor_vals = rng.standard_normal(n)
+    df = pd.DataFrame({"sensor_0": sensor_vals})
+    y = (rng.random(n) > 0.5).astype(int)
+
+    train_idx = list(range(20))
+    val_idx = [20]
+
+    cfg = _make_fold_cfg(selection_method="none")
+    fp = FoldPreprocessor.fit(df.iloc[train_idx], y[train_idx], cfg, random_seed=0)
+
+    train_median = float(np.median(sensor_vals[:20]))
+    assert fp.medians["sensor_0"] == pytest.approx(train_median)
+
+    # Build a val slice where sensor_0 is NaN
+    val_df = df.iloc[val_idx].copy()
+    val_df.loc[val_df.index[0], "sensor_0"] = np.nan
+
+    out = fp.transform(val_df)
+    # The value should have been filled with the train median, then scaled
+    expected_raw = (train_median - fp.scaler_mean[0]) / fp.scaler_scale[0]
+    assert out[0, 0] == pytest.approx(expected_raw)
+
+
+# ---------------------------------------------------------------------------
+# FoldPreprocessor — test 6: zero columns survive → no crash
+# ---------------------------------------------------------------------------
+
+
+def test_fold_preprocessor_all_columns_dropped_no_crash() -> None:
+    """When all columns are dropped (missing_threshold=0), fit does not crash."""
+    from yield_risk.early_detection import FoldPreprocessor
+
+    rng = np.random.default_rng(11)
+    n = 10
+    # All columns have 100% missing → dropped by missing_threshold=0 (strictly > 0)
+    df = pd.DataFrame(
+        {
+            "sensor_0": np.full(n, np.nan),
+            "sensor_1": np.full(n, np.nan),
+        }
+    )
+    y = (rng.random(n) > 0.5).astype(int)
+
+    cfg = _make_fold_cfg(selection_method="none", missing_threshold=0.0)
+    fp = FoldPreprocessor.fit(df, y, cfg, random_seed=0)
+
+    assert fp.retained_cols == []
+    assert fp.medians == {}
+
+    out = fp.transform(df)
+    assert out.shape == (n, 0)
+    assert out.dtype == np.float64

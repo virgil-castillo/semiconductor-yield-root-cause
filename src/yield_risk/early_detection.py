@@ -2,15 +2,30 @@
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from lightgbm import LGBMClassifier
 from sklearn.base import ClassifierMixin
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_selection import (
+    SelectFromModel,
+    SelectKBest,
+    f_classif,
+    mutual_info_classif,
+)
 from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
+
+from yield_risk.preprocess import (
+    drop_high_correlation,
+    drop_high_missing,
+    drop_low_variance,
+)
 
 _VALID_ACCESS_TYPES = frozenset({"prefix", "window"})
 
@@ -284,3 +299,199 @@ def select_ordered_sensors(
         window_cols = raw_sensor_cols[:prefix_end]
 
     return x[window_cols].copy(), window_cols
+
+
+@dataclass
+class FoldPreprocessor:
+    """Fitted preprocessing state for a single cross-validation fold.
+
+    All statistics are computed exclusively from the training fold, preventing
+    any leakage from validation or test rows.
+
+    Attributes:
+        retained_cols: Ordered list of sensor column names that survived all
+            preprocessing filters.
+        medians: Mapping of column name to its train-fold median, used for
+            imputation.
+        scaler_mean: Per-column mean fitted by ``StandardScaler`` on the
+            train fold (shape ``(n_retained,)``).
+        scaler_scale: Per-column scale fitted by ``StandardScaler``.
+            Zero-variance entries are replaced with ``1.0`` to prevent
+            division by zero.
+        selected_idx: Integer indices (into ``retained_cols``) of the columns
+            kept by the feature selector.
+    """
+
+    retained_cols: list[str]
+    medians: dict[str, float]
+    scaler_mean: np.ndarray
+    scaler_scale: np.ndarray
+    selected_idx: np.ndarray  # indices into retained_cols kept by selection
+
+    @classmethod
+    def fit(
+        cls,
+        x_train_window: pd.DataFrame,
+        y_train: np.ndarray,
+        cfg: HyperparamConfig,
+        random_seed: int,
+    ) -> FoldPreprocessor:
+        """Fit all preprocessing statistics on the training fold only.
+
+        Pipeline order:
+        1. ``drop_high_missing`` to choose surviving columns.
+        2. Median imputation (compute and capture medians from train fold).
+        3. ``drop_low_variance`` to further filter columns.
+        4. ``drop_high_correlation`` to remove redundant columns.
+        5. Fit ``StandardScaler``; replace zero-scale entries with 1.0.
+        6. Fit the configured feature selector.
+
+        Args:
+            x_train_window: DataFrame of sensor columns for the training fold.
+            y_train: Binary class labels aligned with ``x_train_window``.
+            cfg: Hyperparameter configuration controlling thresholds, selector,
+                and model family.
+            random_seed: Seed for stochastic components (mutual_info, model).
+
+        Returns:
+            A fitted ``FoldPreprocessor`` capturing all statistics.
+        """
+        # --- Step 1: drop high-missing columns ----------------------------
+        df = x_train_window.copy()
+        df = drop_high_missing(df, cfg.missing_threshold)
+
+        if df.shape[1] == 0:
+            return cls(
+                retained_cols=[],
+                medians={},
+                scaler_mean=np.empty(0, dtype=np.float64),
+                scaler_scale=np.empty(0, dtype=np.float64),
+                selected_idx=np.empty(0, dtype=int),
+            )
+
+        # --- Step 2: median imputation ------------------------------------
+        medians: dict[str, float] = {
+            col: float(df[col].median()) for col in df.columns
+        }
+        df = df.fillna(medians)
+
+        # --- Step 3: drop low-variance ------------------------------------
+        df = drop_low_variance(df, cfg.variance_threshold)
+
+        if df.shape[1] == 0:
+            return cls(
+                retained_cols=[],
+                medians={},
+                scaler_mean=np.empty(0, dtype=np.float64),
+                scaler_scale=np.empty(0, dtype=np.float64),
+                selected_idx=np.empty(0, dtype=int),
+            )
+
+        # --- Step 4: drop high-correlation --------------------------------
+        df = drop_high_correlation(df, cfg.correlation_threshold)
+
+        if df.shape[1] == 0:
+            return cls(
+                retained_cols=[],
+                medians={},
+                scaler_mean=np.empty(0, dtype=np.float64),
+                scaler_scale=np.empty(0, dtype=np.float64),
+                selected_idx=np.empty(0, dtype=int),
+            )
+
+        retained_cols: list[str] = list(df.columns)
+        # Restrict medians to only the retained columns
+        retained_medians: dict[str, float] = {
+            col: medians[col] for col in retained_cols
+        }
+        n_retained = len(retained_cols)
+
+        # --- Step 5: fit StandardScaler -----------------------------------
+        x_arr = df[retained_cols].values.astype(np.float64)
+        scaler = StandardScaler()
+        scaler.fit(x_arr)
+        scaler_mean: np.ndarray = np.asarray(scaler.mean_, dtype=np.float64)
+        scaler_scale: np.ndarray = np.asarray(scaler.scale_, dtype=np.float64)
+        # Replace zero-scale entries with 1.0
+        scaler_scale = np.where(scaler_scale == 0.0, 1.0, scaler_scale)
+
+        x_scaled = (x_arr - scaler_mean) / scaler_scale
+
+        # --- Step 6: fit selector -----------------------------------------
+        method = cfg.selection_method
+        max_f = cfg.max_features
+
+        if method == "none" or max_f is None:
+            selected_idx: np.ndarray = np.arange(n_retained, dtype=int)
+
+        elif method == "univariate":
+            k = min(max_f, n_retained)
+            selector = SelectKBest(f_classif, k=k)
+            selector.fit(x_scaled, y_train)
+            selected_idx = np.where(selector.get_support())[0].astype(int)
+
+        elif method == "mutual_info":
+            k = min(max_f, n_retained)
+            mi_func = functools.partial(
+                mutual_info_classif, random_state=random_seed
+            )
+            selector = SelectKBest(mi_func, k=k)
+            selector.fit(x_scaled, y_train)
+            selected_idx = np.where(selector.get_support())[0].astype(int)
+
+        elif method == "model_importance":
+            estimator = build_estimator(
+                cfg.model_family, cfg.model_params, random_seed
+            )
+            sfm = SelectFromModel(estimator, max_features=max_f)
+            sfm.fit(x_scaled, y_train)
+            selected_idx = np.where(sfm.get_support())[0].astype(int)
+
+        else:
+            raise ValueError(
+                f"Unknown selection_method {method!r}. "
+                "Expected one of 'none', 'univariate', 'mutual_info', "
+                "'model_importance'."
+            )
+
+        return cls(
+            retained_cols=retained_cols,
+            medians=retained_medians,
+            scaler_mean=scaler_mean,
+            scaler_scale=scaler_scale,
+            selected_idx=selected_idx,
+        )
+
+    def transform(self, x_window: pd.DataFrame) -> np.ndarray:
+        """Apply fitted preprocessing to a new (possibly val/test) DataFrame.
+
+        Uses only statistics captured during ``fit`` — no recomputation from
+        ``x_window``.
+
+        Args:
+            x_window: DataFrame of sensor columns (any split).
+
+        Returns:
+            Float64 array of shape ``(n_rows, n_selected)`` after imputation,
+            scaling, and feature selection.  Returns shape ``(n_rows, 0)``
+            when no columns were retained during fit.
+        """
+        n_rows = len(x_window)
+
+        if not self.retained_cols or len(self.selected_idx) == 0:
+            return np.empty((n_rows, 0), dtype=np.float64)
+
+        # Subset to retained columns only
+        df = x_window[self.retained_cols].copy()
+
+        # Impute with train medians
+        df = df.fillna(self.medians)
+
+        x_arr = df.values.astype(np.float64)
+
+        # Scale with fitted stats
+        x_scaled = (x_arr - self.scaler_mean) / self.scaler_scale
+
+        # Select features
+        result: np.ndarray = x_scaled[:, self.selected_idx]
+        return result
