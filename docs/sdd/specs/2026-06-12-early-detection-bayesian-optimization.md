@@ -17,6 +17,19 @@ hyperparameters, and threshold under a leakage-safe nested-CV protocol, then
 compares the winning early configuration against a full-feature baseline on one
 held-out test split.
 
+## Assumption (stated, not claimed from data)
+
+This experiment **asserts raw SECOM column order as a stand-in for
+sensor-acquisition / fabrication progress.** This is a deliberate modeling
+assumption of the maintainer, **not** a property established from the dataset:
+the SECOM sensors are anonymized and carry no process-step, stage, or ordering
+metadata (`reports/data_card.md`), and the labels provide only pass/fail plus a
+per-wafer timestamp. "Earliness" throughout this spec therefore means *earlier
+in column order under this assumption* — it is not a verified claim about
+physical fabrication time. Results must be reported with this caveat; a prior
+GRU experiment hypothesized (but did not isolate) column-order ≠ process-order
+as one possible cause of its negative result.
+
 ## Decisions pinned (resolved ambiguities)
 
 - **BO library: Optuna with the default `TPESampler`.** Already present in the

@@ -14,6 +14,15 @@ return the penalized objective score plus raw detection metrics. This is the
 function the Optuna objective (Spec B) will call once per trial — and the unit
 you verify on real SECOM before building anything on top of it.
 
+## Assumption
+
+`observation_fraction` and the prefix/window slicing treat **raw SECOM column
+order as a stand-in for sensor-acquisition / fabrication progress**. This is a
+declared assumption of the experiment, not a fact derived from the data (SECOM
+sensors are anonymized with no stage/order metadata). "Earliness" means earlier
+*in column order* under this assumption. See the umbrella spec's Assumption
+section.
+
 ## Scope
 
 - New file `src/yield_risk/early_detection.py` (Spec B/C append to it).
