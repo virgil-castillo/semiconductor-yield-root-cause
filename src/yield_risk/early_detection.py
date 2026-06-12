@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import warnings
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,14 +19,21 @@ from sklearn.feature_selection import (
     mutual_info_classif,
 )
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    average_precision_score,
+    balanced_accuracy_score,
+    roc_auc_score,
+)
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
+from yield_risk.config import CostMatrix
 from yield_risk.preprocess import (
     drop_high_correlation,
     drop_high_missing,
     drop_low_variance,
 )
+from yield_risk.thresholding import expected_cost_at_threshold
 
 _VALID_ACCESS_TYPES = frozenset({"prefix", "window"})
 
@@ -495,3 +503,133 @@ class FoldPreprocessor:
         # Select features
         result: np.ndarray = x_scaled[:, self.selected_idx]
         return result
+
+
+def resolve_threshold(
+    y_val: np.ndarray,
+    y_prob: np.ndarray,
+    cfg: HyperparamConfig,
+) -> float:
+    """Resolve the decision threshold for the given policy.
+
+    For ``"tune"`` policy the threshold stored in ``cfg.threshold`` is returned
+    as-is.  For ``"far_constraint"`` policy the lowest threshold (highest
+    recall) whose false-alarm rate (FAR = FP / (FP+TN)) is within
+    ``cfg.false_alarm_rate`` is returned; ``1.0`` is returned when no
+    candidate qualifies.
+
+    Args:
+        y_val: Ground-truth binary labels for the validation fold, shape (n,).
+        y_prob: Predicted positive-class probabilities, shape (n,).
+        cfg: Hyperparameter configuration carrying the threshold policy.
+
+    Returns:
+        A float decision threshold in [0, 1].
+    """
+    if cfg.threshold_policy == "tune":
+        return float(cfg.threshold)  # type: ignore[arg-type]
+
+    # "far_constraint" policy
+    target_far: float = float(cfg.false_alarm_rate)  # type: ignore[arg-type]
+    neg_mask: np.ndarray = y_val == 0
+    n_neg = int(np.sum(neg_mask))
+
+    candidates = np.sort(np.unique(y_prob))
+
+    # If no true negatives, FAR is undefined → treat every threshold as valid;
+    # return the smallest candidate (maximum recall).
+    if n_neg == 0:
+        return float(candidates[0]) if len(candidates) > 0 else 1.0
+
+    best: float | None = None
+    for t in candidates:
+        fp = int(np.sum((y_prob >= t) & neg_mask))
+        far = fp / n_neg
+        if far <= target_far:
+            # candidates are sorted ascending; first qualifying one is the
+            # smallest threshold → maximum recall subject to FAR constraint.
+            best = float(t)
+            break
+
+    return best if best is not None else 1.0
+
+
+def compute_detection_metric(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    threshold: float,
+    metric_name: str,
+    cost_matrix: CostMatrix | None = None,
+) -> float:
+    """Compute a named detection metric for the given predictions.
+
+    Supported metric names:
+
+    * ``"pr_auc"`` — average precision score (threshold-free).
+    * ``"roc_auc"`` — ROC-AUC score (threshold-free).
+    * ``"recall_at_far"`` — recall of the positive class at ``threshold``.
+    * ``"neg_balanced_error"`` — ``balanced_accuracy_score - 1.0``.
+    * ``"neg_expected_cost"`` — negated expected cost at ``threshold``.
+
+    For the threshold-free AUC metrics (``"pr_auc"``, ``"roc_auc"``), if
+    ``y_true`` contains only one class a ``UserWarning`` is emitted and
+    ``float("nan")`` is returned instead of raising.
+
+    Args:
+        y_true: Ground-truth binary labels, shape (n,).
+        y_prob: Predicted positive-class probabilities, shape (n,).
+        threshold: Decision boundary used by thresholded metrics.
+        metric_name: One of ``"pr_auc"``, ``"roc_auc"``, ``"recall_at_far"``,
+            ``"neg_balanced_error"``, ``"neg_expected_cost"``.
+        cost_matrix: Required when ``metric_name == "neg_expected_cost"``.
+
+    Returns:
+        Scalar float metric value.
+
+    Raises:
+        ValueError: If ``metric_name`` is unknown, or if ``metric_name`` is
+            ``"neg_expected_cost"`` and ``cost_matrix`` is ``None``.
+    """
+    if metric_name == "pr_auc":
+        if len(np.unique(y_true)) < 2:
+            warnings.warn(
+                "y_true has only one class; pr_auc is undefined — returning nan.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return float("nan")
+        return float(average_precision_score(y_true, y_prob))
+
+    if metric_name == "roc_auc":
+        if len(np.unique(y_true)) < 2:
+            warnings.warn(
+                "y_true has only one class; roc_auc is undefined — returning nan.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return float("nan")
+        return float(roc_auc_score(y_true, y_prob))
+
+    if metric_name == "recall_at_far":
+        n_pos = int(np.sum(y_true == 1))
+        if n_pos == 0:
+            return float("nan")
+        tp = int(np.sum((y_prob >= threshold) & (y_true == 1)))
+        return float(tp) / float(n_pos)
+
+    if metric_name == "neg_balanced_error":
+        y_pred = (y_prob >= threshold).astype(int)
+        return float(balanced_accuracy_score(y_true, y_pred)) - 1.0
+
+    if metric_name == "neg_expected_cost":
+        if cost_matrix is None:
+            raise ValueError(
+                "cost_matrix must be provided when metric_name == 'neg_expected_cost'."
+            )
+        return -expected_cost_at_threshold(y_true, y_prob, threshold, cost_matrix)
+
+    raise ValueError(
+        f"Unknown metric_name {metric_name!r}. "
+        "Expected one of 'pr_auc', 'roc_auc', 'recall_at_far', "
+        "'neg_balanced_error', 'neg_expected_cost'."
+    )

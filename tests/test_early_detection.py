@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -272,9 +275,6 @@ def test_hyperparam_config_stores_all_fields() -> None:
 # ---------------------------------------------------------------------------
 # build_estimator — helper toy data
 # ---------------------------------------------------------------------------
-
-import numpy as np  # noqa: E402
-
 
 def _toy_xy(seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
     """Return a small 2-class toy dataset that is clearly separable."""
@@ -705,3 +705,308 @@ def test_fold_preprocessor_all_columns_dropped_no_crash() -> None:
     out = fp.transform(df)
     assert out.shape == (n, 0)
     assert out.dtype == np.float64
+
+
+# ---------------------------------------------------------------------------
+# resolve_threshold + compute_detection_metric
+# ---------------------------------------------------------------------------
+
+
+def _make_tune_cfg(threshold: float) -> HyperparamConfig:
+    """Return a HyperparamConfig with threshold_policy='tune'."""
+    return HyperparamConfig(
+        access=SensorAccess(access_type="prefix", prefix_end=1),
+        missing_threshold=0.5,
+        variance_threshold=0.0,
+        correlation_threshold=1.0,
+        selection_method="none",
+        max_features=None,
+        model_family="random_forest",
+        model_params={},
+        threshold_policy="tune",
+        threshold=threshold,
+        false_alarm_rate=None,
+    )
+
+
+def _make_far_cfg(false_alarm_rate: float) -> HyperparamConfig:
+    """Return a HyperparamConfig with threshold_policy='far_constraint'."""
+    return HyperparamConfig(
+        access=SensorAccess(access_type="prefix", prefix_end=1),
+        missing_threshold=0.5,
+        variance_threshold=0.0,
+        correlation_threshold=1.0,
+        selection_method="none",
+        max_features=None,
+        model_family="random_forest",
+        model_params={},
+        threshold_policy="far_constraint",
+        threshold=None,
+        false_alarm_rate=false_alarm_rate,
+    )
+
+
+# ---------------------------------------------------------------------------
+# resolve_threshold — "tune" policy
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_threshold_tune_returns_cfg_threshold() -> None:
+    """resolve_threshold with 'tune' policy returns cfg.threshold exactly."""
+    from yield_risk.early_detection import resolve_threshold
+
+    cfg = _make_tune_cfg(threshold=0.37)
+    y_val = np.array([0, 1, 0, 1])
+    y_prob = np.array([0.1, 0.8, 0.2, 0.9])
+    result = resolve_threshold(y_val, y_prob, cfg)
+    assert result == 0.37
+
+
+# ---------------------------------------------------------------------------
+# resolve_threshold — "far_constraint" policy
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_threshold_far_constraint_selects_lowest_valid_threshold() -> None:
+    """resolve_threshold 'far_constraint' picks lowest threshold with FAR <= target.
+
+    Setup:
+      y_true: [0, 0, 0, 0, 1, 1]  → 4 true negatives, 2 positives
+      y_prob: [0.1, 0.2, 0.4, 0.6, 0.7, 0.9]
+
+    Candidate thresholds (unique y_prob values): 0.1, 0.2, 0.4, 0.6, 0.7, 0.9
+
+    At threshold t, positives = samples with y_prob >= t.
+    FAR = FP / (FP + TN) = (negatives predicted positive) / 4
+
+    threshold=0.1: all 4 negatives predicted positive → FAR = 4/4 = 1.0
+    threshold=0.2: negatives [0.2, 0.4, 0.6] predicted → FAR = 3/4 = 0.75
+    threshold=0.4: negatives [0.4, 0.6] predicted    → FAR = 2/4 = 0.50
+    threshold=0.6: negatives [0.6] predicted         → FAR = 1/4 = 0.25
+    threshold=0.7: no negatives predicted            → FAR = 0/4 = 0.0
+    threshold=0.9: no negatives predicted            → FAR = 0/4 = 0.0
+
+    With target FAR=0.25: thresholds satisfying FAR<=0.25 are 0.6, 0.7, 0.9.
+    Lowest (most recall) = 0.6.
+    """
+    from yield_risk.early_detection import resolve_threshold
+
+    y_true = np.array([0, 0, 0, 0, 1, 1])
+    y_prob = np.array([0.1, 0.2, 0.4, 0.6, 0.7, 0.9])
+    cfg = _make_far_cfg(false_alarm_rate=0.25)
+    result = resolve_threshold(y_true, y_prob, cfg)
+    assert result == pytest.approx(0.6)
+
+    # Verify: threshold=0.6 satisfies FAR<=0.25
+    neg_mask = y_true == 0
+    far_at_result = float(np.sum((y_prob >= result) & neg_mask)) / float(
+        np.sum(neg_mask)
+    )
+    assert far_at_result <= 0.25
+
+    # Verify: lowering to next candidate (0.4) violates the cap
+    far_at_lower = float(np.sum((y_prob >= 0.4) & neg_mask)) / float(
+        np.sum(neg_mask)
+    )
+    assert far_at_lower > 0.25
+
+
+def test_resolve_threshold_far_constraint_no_qualifying_threshold_returns_one() -> None:
+    """resolve_threshold 'far_constraint' returns 1.0 when no threshold qualifies.
+
+    With target FAR=0.0 but every threshold predicts at least one FP:
+      y_true: [0, 0, 1]
+      y_prob: [0.3, 0.5, 0.9]
+
+    threshold=0.3: FAR = 2/2 = 1.0 (both negatives predicted)
+    threshold=0.5: FAR = 1/2 = 0.5 (one negative predicted)
+    threshold=0.9: FAR = 0/2 = 0.0 (no negative predicted) → qualifies!
+
+    Use target FAR=-0.01 so that no threshold can satisfy FAR <= -0.01.
+    """
+    from yield_risk.early_detection import resolve_threshold
+
+    y_true = np.array([0, 0, 1])
+    y_prob = np.array([0.3, 0.5, 0.9])
+    # FAR is always >= 0, so target=-0.01 guarantees no threshold qualifies
+    cfg = _make_far_cfg(false_alarm_rate=-0.01)
+    result = resolve_threshold(y_true, y_prob, cfg)
+    assert result == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# compute_detection_metric — pr_auc
+# ---------------------------------------------------------------------------
+
+
+def test_compute_detection_metric_pr_auc_matches_average_precision() -> None:
+    """compute_detection_metric 'pr_auc' equals average_precision_score."""
+    from sklearn.metrics import average_precision_score
+
+    from yield_risk.early_detection import compute_detection_metric
+
+    y_true = np.array([0, 0, 1, 1, 0, 1])
+    y_prob = np.array([0.1, 0.3, 0.6, 0.8, 0.4, 0.9])
+    expected = average_precision_score(y_true, y_prob)
+    result = compute_detection_metric(
+        y_true, y_prob, threshold=0.5, metric_name="pr_auc"
+    )
+    assert result == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# compute_detection_metric — roc_auc
+# ---------------------------------------------------------------------------
+
+
+def test_compute_detection_metric_roc_auc_matches_roc_auc_score() -> None:
+    """compute_detection_metric 'roc_auc' equals roc_auc_score."""
+    from sklearn.metrics import roc_auc_score
+
+    from yield_risk.early_detection import compute_detection_metric
+
+    y_true = np.array([0, 0, 1, 1, 0, 1])
+    y_prob = np.array([0.1, 0.3, 0.6, 0.8, 0.4, 0.9])
+    expected = roc_auc_score(y_true, y_prob)
+    result = compute_detection_metric(
+        y_true, y_prob, threshold=0.5, metric_name="roc_auc"
+    )
+    assert result == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# compute_detection_metric — recall_at_far
+# ---------------------------------------------------------------------------
+
+
+def test_compute_detection_metric_recall_at_far_matches_manual() -> None:
+    """compute_detection_metric 'recall_at_far' equals manual recall calculation."""
+    from yield_risk.early_detection import compute_detection_metric
+
+    # y_true: 3 positives at indices 2,3,5 with y_prob 0.6, 0.8, 0.9
+    # threshold=0.7 → predict positive when y_prob >= 0.7 → indices 3 and 5
+    # TP=2, FN=1 → recall = 2/3
+    y_true = np.array([0, 0, 1, 1, 0, 1])
+    y_prob = np.array([0.1, 0.3, 0.6, 0.8, 0.4, 0.9])
+    result = compute_detection_metric(
+        y_true, y_prob, threshold=0.7, metric_name="recall_at_far"
+    )
+    assert result == pytest.approx(2.0 / 3.0)
+
+
+def test_compute_detection_metric_recall_at_far_no_positives_returns_nan() -> None:
+    """recall_at_far returns nan when no positives in y_true."""
+    from yield_risk.early_detection import compute_detection_metric
+
+    y_true = np.array([0, 0, 0])
+    y_prob = np.array([0.1, 0.5, 0.9])
+    result = compute_detection_metric(
+        y_true, y_prob, threshold=0.5, metric_name="recall_at_far"
+    )
+    assert math.isnan(result)
+
+
+# ---------------------------------------------------------------------------
+# compute_detection_metric — neg_balanced_error
+# ---------------------------------------------------------------------------
+
+
+def test_compute_detection_metric_neg_balanced_error_matches_manual() -> None:
+    """compute_detection_metric 'neg_balanced_error' equals balanced_accuracy-1."""
+    from sklearn.metrics import balanced_accuracy_score
+
+    from yield_risk.early_detection import compute_detection_metric
+
+    y_true = np.array([0, 0, 1, 1, 0, 1])
+    y_prob = np.array([0.1, 0.3, 0.6, 0.8, 0.4, 0.9])
+    threshold = 0.5
+    y_pred = (y_prob >= threshold).astype(int)
+    expected = balanced_accuracy_score(y_true, y_pred) - 1.0
+    result = compute_detection_metric(
+        y_true, y_prob, threshold=threshold, metric_name="neg_balanced_error"
+    )
+    assert result == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# compute_detection_metric — neg_expected_cost
+# ---------------------------------------------------------------------------
+
+
+def test_compute_detection_metric_neg_expected_cost_matches_thresholding() -> None:
+    """neg_expected_cost equals -expected_cost_at_threshold."""
+    from yield_risk.config import CostMatrix
+    from yield_risk.early_detection import compute_detection_metric
+    from yield_risk.thresholding import expected_cost_at_threshold
+
+    y_true = np.array([0, 0, 1, 1, 0, 1])
+    y_prob = np.array([0.1, 0.3, 0.6, 0.8, 0.4, 0.9])
+    threshold = 0.5
+    cm = CostMatrix(true_pass=0.0, true_fail=0.0, false_fail=1.0, false_pass=5.0)
+    expected = -expected_cost_at_threshold(y_true, y_prob, threshold, cm)
+    result = compute_detection_metric(
+        y_true, y_prob, threshold=threshold, metric_name="neg_expected_cost",
+        cost_matrix=cm,
+    )
+    assert result == pytest.approx(expected)
+
+
+def test_compute_detection_metric_neg_expected_cost_none_matrix_raises() -> None:
+    """neg_expected_cost raises ValueError when cost_matrix is None."""
+    from yield_risk.early_detection import compute_detection_metric
+
+    y_true = np.array([0, 1])
+    y_prob = np.array([0.3, 0.8])
+    with pytest.raises(ValueError, match="cost_matrix"):
+        compute_detection_metric(
+            y_true, y_prob, threshold=0.5, metric_name="neg_expected_cost",
+            cost_matrix=None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# compute_detection_metric — unknown metric_name
+# ---------------------------------------------------------------------------
+
+
+def test_compute_detection_metric_unknown_metric_raises() -> None:
+    """compute_detection_metric raises ValueError for unknown metric_name."""
+    from yield_risk.early_detection import compute_detection_metric
+
+    y_true = np.array([0, 1])
+    y_prob = np.array([0.3, 0.8])
+    with pytest.raises(ValueError, match="metric_name"):
+        compute_detection_metric(
+            y_true, y_prob, threshold=0.5, metric_name="bogus_metric"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Single-class guard — pr_auc and roc_auc return nan + emit warning
+# ---------------------------------------------------------------------------
+
+
+def test_compute_detection_metric_pr_auc_single_class_nan_warning() -> None:
+    """pr_auc on single-class y_true returns nan and emits a UserWarning."""
+    from yield_risk.early_detection import compute_detection_metric
+
+    y_true = np.array([0, 0, 0])
+    y_prob = np.array([0.1, 0.4, 0.7])
+    with pytest.warns(UserWarning):
+        result = compute_detection_metric(
+            y_true, y_prob, threshold=0.5, metric_name="pr_auc"
+        )
+    assert math.isnan(result)
+
+
+def test_compute_detection_metric_roc_auc_single_class_nan_warning() -> None:
+    """roc_auc on single-class y_true returns nan and emits a UserWarning."""
+    from yield_risk.early_detection import compute_detection_metric
+
+    y_true = np.array([1, 1, 1])
+    y_prob = np.array([0.6, 0.8, 0.9])
+    with pytest.warns(UserWarning):
+        result = compute_detection_metric(
+            y_true, y_prob, threshold=0.5, metric_name="roc_auc"
+        )
+    assert math.isnan(result)
