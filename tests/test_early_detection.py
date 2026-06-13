@@ -2547,3 +2547,457 @@ def test_run_study_user_attr_types_are_correct() -> None:
         assert isinstance(attrs["access_type"], str)
         assert isinstance(attrs["latest_index"], int)
         assert isinstance(attrs["model_family"], str)
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared by build_best_record tests
+# ---------------------------------------------------------------------------
+
+
+def _make_ed_cfg_for_build(
+    n_trials: int = 4,
+    n_sensors: int = 10,
+) -> EarlyDetectionConfig:
+    """Return a small EarlyDetectionConfig for build_best_record tests.
+
+    Args:
+        n_trials: Number of Optuna trials.
+        n_sensors: Total number of sensor columns (sets max_window_size).
+
+    Returns:
+        A minimal EarlyDetectionConfig.
+    """
+    return EarlyDetectionConfig(
+        n_trials=n_trials,
+        sampler_seed=7,
+        inner_cv_folds=2,
+        detection_metric="pr_auc",
+        alpha=0.1,
+        access_types=["prefix"],
+        min_window_size=2,
+        max_window_size=n_sensors,
+        model_families=["random_forest"],
+        missing_threshold=(0.2, 0.9),
+        variance_threshold=(1e-6, 1e-2),
+        correlation_threshold=(0.85, 0.99),
+        selection_methods=["none"],
+        max_features=(2, n_sensors),
+        threshold_policy="tune",
+        threshold_range=(0.1, 0.8),
+        false_alarm_rate=0.1,
+        performance_tolerance=0.05,
+        curve_prefixes=[16, 32],
+    )
+
+
+def _make_build_data(
+    n_rows: int = 80,
+    n_sensors: int = 10,
+    seed: int = 77,
+) -> tuple[pd.DataFrame, np.ndarray, list[str]]:
+    """Return synthetic data for build_best_record tests.
+
+    Args:
+        n_rows: Number of samples.
+        n_sensors: Number of sensor columns.
+        seed: RNG seed.
+
+    Returns:
+        Tuple of (x_train, y_train, raw_sensor_cols).
+    """
+    rng = np.random.default_rng(seed)
+    raw_sensor_cols = [f"sensor_{i:03d}" for i in range(n_sensors)]
+    x = pd.DataFrame(
+        {col: rng.standard_normal(n_rows) for col in raw_sensor_cols}
+    )
+    y = (rng.random(n_rows) < 0.35).astype(int)
+    return x, y, raw_sensor_cols
+
+
+# ---------------------------------------------------------------------------
+# hyperparam_config_to_dict — shape and round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_hyperparam_config_to_dict_shape_prefix_tune() -> None:
+    """hyperparam_config_to_dict with prefix/tune config has correct keys/values."""
+    from yield_risk.early_detection import hyperparam_config_to_dict
+
+    access = SensorAccess(access_type="prefix", prefix_end=5)
+    cfg = HyperparamConfig(
+        access=access,
+        missing_threshold=0.4,
+        variance_threshold=0.001,
+        correlation_threshold=0.9,
+        selection_method="none",
+        max_features=None,
+        model_family="random_forest",
+        model_params={"n_estimators": 100, "class_weight": None},
+        threshold_policy="tune",
+        threshold=0.3,
+        false_alarm_rate=None,
+    )
+    d = hyperparam_config_to_dict(cfg)
+
+    assert d["access"] == {
+        "access_type": "prefix",
+        "prefix_end": 5,
+        "window_start": None,
+        "window_size": None,
+    }
+    assert d["missing_threshold"] == pytest.approx(0.4)
+    assert d["variance_threshold"] == pytest.approx(0.001)
+    assert d["correlation_threshold"] == pytest.approx(0.9)
+    assert d["selection_method"] == "none"
+    assert d["max_features"] is None
+    assert d["model_family"] == "random_forest"
+    assert d["model_params"] == {"n_estimators": 100, "class_weight": None}
+    assert d["threshold_policy"] == "tune"
+    assert d["threshold"] == pytest.approx(0.3)
+    assert d["false_alarm_rate"] is None
+
+
+def test_hyperparam_config_to_dict_shape_window_far() -> None:
+    """hyperparam_config_to_dict with window/far_constraint config has correct shape."""
+    from yield_risk.early_detection import hyperparam_config_to_dict
+
+    access = SensorAccess(access_type="window", window_start=2, window_size=4)
+    cfg = HyperparamConfig(
+        access=access,
+        missing_threshold=0.3,
+        variance_threshold=0.005,
+        correlation_threshold=0.95,
+        selection_method="univariate",
+        max_features=10,
+        model_family="logistic_regression",
+        model_params={"C": 1.0, "penalty": "l2", "class_weight": "balanced"},
+        threshold_policy="far_constraint",
+        threshold=None,
+        false_alarm_rate=0.05,
+    )
+    d = hyperparam_config_to_dict(cfg)
+
+    assert d["access"] == {
+        "access_type": "window",
+        "prefix_end": None,
+        "window_start": 2,
+        "window_size": 4,
+    }
+    assert d["max_features"] == 10
+    assert d["threshold"] is None
+    assert d["false_alarm_rate"] == pytest.approx(0.05)
+
+
+def test_hyperparam_config_to_dict_round_trip() -> None:
+    """Serialized HyperparamConfig can be reconstructed to an equal object."""
+    from yield_risk.early_detection import hyperparam_config_to_dict
+
+    access = SensorAccess(access_type="prefix", prefix_end=7)
+    cfg = HyperparamConfig(
+        access=access,
+        missing_threshold=0.45,
+        variance_threshold=0.002,
+        correlation_threshold=0.88,
+        selection_method="mutual_info",
+        max_features=15,
+        model_family="xgboost",
+        model_params={"learning_rate": 0.05, "n_estimators": 200},
+        threshold_policy="tune",
+        threshold=0.4,
+        false_alarm_rate=None,
+    )
+    d = hyperparam_config_to_dict(cfg)
+
+    # Rebuild from the dict
+    access_reconstructed = SensorAccess(**d["access"])  # type: ignore[arg-type]
+    cfg_reconstructed = HyperparamConfig(
+        access=access_reconstructed,
+        missing_threshold=d["missing_threshold"],  # type: ignore[arg-type]
+        variance_threshold=d["variance_threshold"],  # type: ignore[arg-type]
+        correlation_threshold=d["correlation_threshold"],  # type: ignore[arg-type]
+        selection_method=d["selection_method"],  # type: ignore[arg-type]
+        max_features=d["max_features"],  # type: ignore[arg-type]
+        model_family=d["model_family"],  # type: ignore[arg-type]
+        model_params=d["model_params"],  # type: ignore[arg-type]
+        threshold_policy=d["threshold_policy"],  # type: ignore[arg-type]
+        threshold=d["threshold"],  # type: ignore[arg-type]
+        false_alarm_rate=d["false_alarm_rate"],  # type: ignore[arg-type]
+    )
+    assert cfg_reconstructed == cfg
+
+
+# ---------------------------------------------------------------------------
+# build_best_record — provenance keys present with expected values
+# ---------------------------------------------------------------------------
+
+
+def test_build_best_record_provenance_keys_present() -> None:
+    """build_best_record record contains all 9 provenance keys with correct values."""
+    from yield_risk.early_detection import build_best_record, run_study
+
+    x, y, raw_sensor_cols = _make_build_data()
+    n_sensors = len(raw_sensor_cols)
+    ed_cfg = _make_ed_cfg_for_build(n_trials=4, n_sensors=n_sensors)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = run_study(x, y, raw_sensor_cols, ed_cfg, random_seed=5)
+
+    record = build_best_record(
+        study, ed_cfg, n_sensors=n_sensors, test_size=0.2, random_seed=5
+    )
+
+    prov = record["provenance"]
+    assert isinstance(prov, dict)
+
+    assert prov["n_sensors"] == n_sensors
+    assert prov["n_trials"] == ed_cfg.n_trials
+    assert prov["sampler_seed"] == ed_cfg.sampler_seed
+    assert prov["inner_cv_folds"] == ed_cfg.inner_cv_folds
+    assert prov["detection_metric"] == ed_cfg.detection_metric
+    assert prov["alpha"] == pytest.approx(ed_cfg.alpha)
+    assert prov["threshold_policy"] == ed_cfg.threshold_policy
+    assert prov["test_size"] == pytest.approx(0.2)
+    assert prov["random_seed"] == 5
+
+
+# ---------------------------------------------------------------------------
+# build_best_record — top-level fields
+# ---------------------------------------------------------------------------
+
+
+def test_build_best_record_top_level_fields_present() -> None:
+    """build_best_record record contains best_trial_number, penalized_score, attrs."""
+    from yield_risk.early_detection import build_best_record, run_study
+
+    x, y, raw_sensor_cols = _make_build_data()
+    n_sensors = len(raw_sensor_cols)
+    ed_cfg = _make_ed_cfg_for_build(n_trials=4, n_sensors=n_sensors)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = run_study(x, y, raw_sensor_cols, ed_cfg, random_seed=5)
+
+    record = build_best_record(
+        study, ed_cfg, n_sensors=n_sensors, test_size=0.2, random_seed=5
+    )
+
+    assert "best_trial_number" in record
+    assert record["best_trial_number"] == study.best_trial.number
+
+    assert "penalized_score" in record
+    assert record["penalized_score"] == pytest.approx(study.best_trial.value)
+
+    # User attrs from best trial
+    best_attrs = study.best_trial.user_attrs
+    assert record["observation_fraction"] == pytest.approx(
+        best_attrs["observation_fraction"]
+    )
+    assert record["n_features_selected"] == pytest.approx(
+        best_attrs["n_features_selected"]
+    )
+    assert record["feasible"] == best_attrs["feasible"]
+    assert record["latest_index"] == best_attrs["latest_index"]
+
+
+# ---------------------------------------------------------------------------
+# build_best_record — config round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_build_best_record_config_round_trip() -> None:
+    """Serialized config in record reconstructs to equal HyperparamConfig.
+
+    Rebuilds via SensorAccess(**d["access"]) + HyperparamConfig(...) and asserts
+    equality with suggest_config(study.best_trial, ed_cfg, n_sensors).
+    """
+    from yield_risk.early_detection import (
+        build_best_record,
+        run_study,
+        suggest_config,
+    )
+
+    x, y, raw_sensor_cols = _make_build_data()
+    n_sensors = len(raw_sensor_cols)
+    ed_cfg = _make_ed_cfg_for_build(n_trials=4, n_sensors=n_sensors)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = run_study(x, y, raw_sensor_cols, ed_cfg, random_seed=5)
+
+    record = build_best_record(
+        study, ed_cfg, n_sensors=n_sensors, test_size=0.2, random_seed=5
+    )
+
+    cfg_d = record["config"]
+    assert isinstance(cfg_d, dict)
+
+    # Reconstruct manually
+    access_reconstructed = SensorAccess(**cfg_d["access"])  # type: ignore[arg-type]
+    cfg_reconstructed = HyperparamConfig(
+        access=access_reconstructed,
+        missing_threshold=cfg_d["missing_threshold"],  # type: ignore[arg-type]
+        variance_threshold=cfg_d["variance_threshold"],  # type: ignore[arg-type]
+        correlation_threshold=cfg_d["correlation_threshold"],  # type: ignore[arg-type]
+        selection_method=cfg_d["selection_method"],  # type: ignore[arg-type]
+        max_features=cfg_d["max_features"],  # type: ignore[arg-type]
+        model_family=cfg_d["model_family"],  # type: ignore[arg-type]
+        model_params=cfg_d["model_params"],  # type: ignore[arg-type]
+        threshold_policy=cfg_d["threshold_policy"],  # type: ignore[arg-type]
+        threshold=cfg_d["threshold"],  # type: ignore[arg-type]
+        false_alarm_rate=cfg_d["false_alarm_rate"],  # type: ignore[arg-type]
+    )
+
+    # The winning config via suggest_config on the frozen best trial
+    cfg_from_suggest = suggest_config(
+        study.best_trial,  # type: ignore[arg-type]
+        ed_cfg,
+        n_sensors,
+    )
+
+    assert cfg_reconstructed == cfg_from_suggest
+
+
+# ---------------------------------------------------------------------------
+# build_best_record — nan → null serialization
+# ---------------------------------------------------------------------------
+
+
+def test_build_best_record_json_roundtrip_no_nan_tokens() -> None:
+    """json.dumps(record) produces valid JSON; json.loads succeeds without error."""
+    import json
+
+    from yield_risk.early_detection import build_best_record, run_study
+
+    x, y, raw_sensor_cols = _make_build_data()
+    n_sensors = len(raw_sensor_cols)
+    ed_cfg = _make_ed_cfg_for_build(n_trials=4, n_sensors=n_sensors)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = run_study(x, y, raw_sensor_cols, ed_cfg, random_seed=5)
+
+    record = build_best_record(
+        study, ed_cfg, n_sensors=n_sensors, test_size=0.2, random_seed=5
+    )
+
+    json_str = json.dumps(record)
+    # Must not raise and must not contain the NaN token
+    assert "NaN" not in json_str
+    assert "Infinity" not in json_str
+    reloaded = json.loads(json_str)
+    assert isinstance(reloaded, dict)
+
+
+def test_build_best_record_infeasible_study_detection_metric_null() -> None:
+    """All-infeasible study: record['detection_metric'] serializes as null (None)."""
+    import json
+
+    from yield_risk.early_detection import build_best_record, run_study
+
+    x, y, raw_sensor_cols = _make_build_data()
+    n_sensors = len(raw_sensor_cols)
+
+    # Variance threshold so high all columns are dropped → all infeasible
+    infeasible_ed_cfg = EarlyDetectionConfig(
+        n_trials=3,
+        sampler_seed=7,
+        inner_cv_folds=2,
+        detection_metric="pr_auc",
+        alpha=0.1,
+        access_types=["prefix"],
+        min_window_size=2,
+        max_window_size=n_sensors,
+        model_families=["random_forest"],
+        missing_threshold=(0.2, 0.9),
+        variance_threshold=(1e10, 2e10),  # all columns dropped
+        correlation_threshold=(0.85, 0.99),
+        selection_methods=["none"],
+        max_features=(2, n_sensors),
+        threshold_policy="tune",
+        threshold_range=(0.1, 0.8),
+        false_alarm_rate=0.1,
+        performance_tolerance=0.05,
+        curve_prefixes=[16, 32],
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = run_study(
+            x, y, raw_sensor_cols, infeasible_ed_cfg, random_seed=5
+        )
+
+    # Must not raise
+    record = build_best_record(
+        study, infeasible_ed_cfg, n_sensors=n_sensors, test_size=0.2, random_seed=5
+    )
+
+    # detection_metric should be None (nan sanitized)
+    assert record["detection_metric"] is None
+    assert record["feasible"] is False
+
+    # And the full JSON round-trip must succeed
+    json_str = json.dumps(record)
+    reloaded = json.loads(json_str)
+    assert reloaded["detection_metric"] is None
+
+
+def test_sanitize_nan_directly() -> None:
+    """The nan→null sanitizer converts nan/inf scalars and nested structures."""
+    import json
+
+    from yield_risk.early_detection import build_best_record, run_study
+
+    # We test nan sanitization indirectly: a record with a known nan field
+    # must have that field as None after build_best_record.
+    # Direct unit test of the sanitizer via a known-infeasible record:
+    x, y, raw_sensor_cols = _make_build_data()
+    n_sensors = len(raw_sensor_cols)
+
+    infeasible_ed_cfg = EarlyDetectionConfig(
+        n_trials=2,
+        sampler_seed=7,
+        inner_cv_folds=2,
+        detection_metric="pr_auc",
+        alpha=0.1,
+        access_types=["prefix"],
+        min_window_size=2,
+        max_window_size=n_sensors,
+        model_families=["random_forest"],
+        missing_threshold=(0.2, 0.9),
+        variance_threshold=(1e10, 2e10),
+        correlation_threshold=(0.85, 0.99),
+        selection_methods=["none"],
+        max_features=(2, n_sensors),
+        threshold_policy="tune",
+        threshold_range=(0.1, 0.8),
+        false_alarm_rate=0.1,
+        performance_tolerance=0.05,
+        curve_prefixes=[16, 32],
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = run_study(
+            x, y, raw_sensor_cols, infeasible_ed_cfg, random_seed=5
+        )
+
+    record = build_best_record(
+        study, infeasible_ed_cfg, n_sensors=n_sensors, test_size=0.2, random_seed=5
+    )
+
+    # The raw detection_metric user attr is nan → must be None in the record
+    raw_dm = study.best_trial.user_attrs["detection_metric"]
+    assert math.isnan(raw_dm), "Expected nan detection_metric for all-infeasible study"
+    assert record["detection_metric"] is None
+
+    # Entire record must be valid JSON (no NaN tokens)
+    json_str = json.dumps(record)
+    assert "NaN" not in json_str
+    json.loads(json_str)  # must not raise

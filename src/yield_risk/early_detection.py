@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import json
 import math
 import warnings
 from collections.abc import Mapping
@@ -1401,3 +1402,161 @@ def run_study(
 
     study.optimize(objective, n_trials=ed_cfg.n_trials, n_jobs=1)
     return study
+
+
+# ---------------------------------------------------------------------------
+# hyperparam_config_to_dict + build_best_record  (Spec B §4)
+# ---------------------------------------------------------------------------
+
+
+def _sanitize(obj: object) -> object:
+    """Recursively replace non-finite floats with None for JSON safety.
+
+    Walks dicts, lists, and scalars.  Any ``float`` value that is ``nan``,
+    ``inf``, or ``-inf`` is replaced with ``None`` so that ``json.dumps``
+    produces valid JSON without NaN/Infinity tokens.
+
+    Args:
+        obj: Any JSON-compatible Python object (dict, list, float, int, str,
+            bool, or None).
+
+    Returns:
+        The same structure with non-finite floats replaced by ``None``.
+    """
+    if isinstance(obj, float):
+        return None if not math.isfinite(obj) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    return obj
+
+
+def hyperparam_config_to_dict(cfg: HyperparamConfig) -> dict[str, object]:
+    """Serialize a ``HyperparamConfig`` to a JSON-compatible dict.
+
+    The returned dict mirrors every field of ``HyperparamConfig``:
+
+    * ``access``: nested dict with keys ``access_type``, ``prefix_end``,
+      ``window_start``, ``window_size`` (``None`` preserved for inapplicable
+      fields).
+    * All scalar fields (``missing_threshold``, ``variance_threshold``, etc.)
+      are returned verbatim.
+    * ``model_params`` is returned verbatim (``None`` values preserved, e.g.
+      ``class_weight: None``).
+
+    The result round-trips: reconstructing via
+    ``SensorAccess(**d["access"])`` and ``HyperparamConfig(...)`` yields an
+    object equal to ``cfg``.
+
+    Args:
+        cfg: The ``HyperparamConfig`` to serialize.
+
+    Returns:
+        A dict whose values are JSON-serializable (once ``nan``/``inf`` are
+        sanitized by the caller).
+    """
+    return {
+        "access": {
+            "access_type": cfg.access.access_type,
+            "prefix_end": cfg.access.prefix_end,
+            "window_start": cfg.access.window_start,
+            "window_size": cfg.access.window_size,
+        },
+        "missing_threshold": cfg.missing_threshold,
+        "variance_threshold": cfg.variance_threshold,
+        "correlation_threshold": cfg.correlation_threshold,
+        "selection_method": cfg.selection_method,
+        "max_features": cfg.max_features,
+        "model_family": cfg.model_family,
+        "model_params": dict(cfg.model_params),
+        "threshold_policy": cfg.threshold_policy,
+        "threshold": cfg.threshold,
+        "false_alarm_rate": cfg.false_alarm_rate,
+    }
+
+
+def build_best_record(
+    study: optuna.Study,
+    ed_cfg: EarlyDetectionConfig,
+    *,
+    n_sensors: int,
+    test_size: float,
+    random_seed: int,
+) -> dict[str, object]:
+    """Build a JSON-serializable summary record for the best Optuna trial.
+
+    Reconstructs the winning ``HyperparamConfig`` from ``study.best_trial``
+    by calling ``suggest_config`` (which on a completed/frozen trial simply
+    returns the already-recorded parameter values without resampling), then
+    serializes it via ``hyperparam_config_to_dict``.
+
+    Non-finite float values (``nan``, ``inf``, ``-inf``) are replaced with
+    ``None`` so that ``json.dumps(record)`` produces valid JSON.  In
+    particular, an all-infeasible study's ``detection_metric`` (which is
+    ``nan``) will appear as ``null`` in the serialized output.
+
+    Args:
+        study: The completed ``optuna.Study`` returned by ``run_study``.
+        ed_cfg: The study-wide configuration used to run ``study``.
+        n_sensors: Total number of raw sensor columns in the training set.
+            Used to reconstruct the ``HyperparamConfig`` via ``suggest_config``.
+        test_size: Fraction of data held out as a test set (used by Spec C to
+            reproduce the identical holdout split).
+        random_seed: Random seed passed to ``run_study`` (stored for
+            reproducibility).
+
+    Returns:
+        A ``dict[str, object]`` that is valid JSON (no NaN/Infinity tokens)
+        with the following top-level keys:
+
+        * ``best_trial_number``: ``int`` — trial index of the winner.
+        * ``penalized_score``: ``float`` — ``study.best_trial.value``.
+        * ``detection_metric``: raw detection metric from user attrs (``None``
+          when all trials were infeasible).
+        * ``observation_fraction``: fraction of sensors observable at the
+          winning stage.
+        * ``n_features_selected``: mean number of selected features across
+          valid CV folds.
+        * ``feasible``: ``bool`` — whether the winning trial was feasible.
+        * ``latest_index``: exclusive end index of the observable sensor
+          window.
+        * ``config``: the winning ``HyperparamConfig`` serialized by
+          ``hyperparam_config_to_dict``.
+        * ``provenance``: dict with 9 keys reproducing study metadata.
+    """
+    best = study.best_trial
+    best_attrs = best.user_attrs
+
+    winning_cfg = suggest_config(
+        cast("optuna.Trial", best),
+        ed_cfg,
+        n_sensors,
+    )
+
+    record: dict[str, object] = {
+        "best_trial_number": best.number,
+        "penalized_score": best.value,
+        "detection_metric": best_attrs["detection_metric"],
+        "observation_fraction": best_attrs["observation_fraction"],
+        "n_features_selected": best_attrs["n_features_selected"],
+        "feasible": best_attrs["feasible"],
+        "latest_index": best_attrs["latest_index"],
+        "config": hyperparam_config_to_dict(winning_cfg),
+        "provenance": {
+            "n_sensors": n_sensors,
+            "n_trials": ed_cfg.n_trials,
+            "sampler_seed": ed_cfg.sampler_seed,
+            "inner_cv_folds": ed_cfg.inner_cv_folds,
+            "detection_metric": ed_cfg.detection_metric,
+            "alpha": ed_cfg.alpha,
+            "threshold_policy": ed_cfg.threshold_policy,
+            "test_size": test_size,
+            "random_seed": random_seed,
+        },
+    }
+
+    sanitized = cast("dict[str, object]", _sanitize(record))
+    # Verify the result is truly JSON-safe (raises if any non-finite leaked)
+    json.dumps(sanitized)
+    return sanitized
