@@ -1522,6 +1522,242 @@ def test_evaluate_config_xgboost_runs_without_scale_pos_weight() -> None:
 
 
 # ---------------------------------------------------------------------------
+# EarlyDetectionConfig + load_early_detection_config tests (Spec B §1)
+# ---------------------------------------------------------------------------
+
+_YAML_PATH = Path(
+    "C:/Users/Virgil/Code/semiconductor-yield-root-cause"
+    "/configs/early_detection_config.yaml"
+)
+
+
+def test_load_early_detection_config_defaults_on_missing_file(
+    tmp_path: Path,
+) -> None:
+    """Missing config file returns all documented defaults without raising."""
+    from yield_risk.early_detection import load_early_detection_config
+
+    non_existent = tmp_path / "no_such_file.yaml"
+    cfg = load_early_detection_config(non_existent)
+
+    assert cfg.n_trials == 100
+    assert cfg.sampler_seed == 42
+    assert cfg.inner_cv_folds == 5
+    assert cfg.detection_metric == "pr_auc"
+    assert cfg.alpha == pytest.approx(0.10)
+    assert cfg.access_types == ["prefix", "window"]
+    assert cfg.min_window_size == 8
+    assert cfg.max_window_size == 256
+    assert cfg.model_families == [
+        "logistic_regression",
+        "random_forest",
+        "xgboost",
+        "lightgbm",
+    ]
+    assert cfg.missing_threshold == (0.2, 0.6)
+    assert cfg.variance_threshold == pytest.approx((1.0e-6, 1.0e-2))
+    assert cfg.correlation_threshold == pytest.approx((0.85, 0.99))
+    assert cfg.selection_methods == [
+        "none",
+        "univariate",
+        "mutual_info",
+        "model_importance",
+    ]
+    assert cfg.max_features == (10, 200)
+    assert cfg.threshold_policy == "tune"
+    assert cfg.threshold_range == pytest.approx((0.01, 0.80))
+    assert cfg.false_alarm_rate == pytest.approx(0.10)
+    assert cfg.performance_tolerance == pytest.approx(0.05)
+    assert cfg.curve_prefixes == [16, 32, 64, 128, 256, 512]
+
+
+def test_load_early_detection_config_shipped_yaml_matches_defaults() -> None:
+    """The shipped YAML produces identical values to the hard-coded defaults."""
+    from yield_risk.early_detection import load_early_detection_config
+
+    cfg_file = load_early_detection_config(_YAML_PATH)
+    cfg_default = load_early_detection_config(
+        _YAML_PATH.parent / "__nonexistent__.yaml"
+    )
+    assert cfg_file == cfg_default
+
+
+def test_load_early_detection_config_unknown_key_raises(tmp_path: Path) -> None:
+    """An unknown YAML key raises ValueError listing the offending key."""
+    from yield_risk.early_detection import load_early_detection_config
+
+    bad_yaml = tmp_path / "bad.yaml"
+    bad_yaml.write_text("n_trials: 50\nunknown_param: 99\n")
+    with pytest.raises(ValueError, match="unknown_param"):
+        load_early_detection_config(bad_yaml)
+
+
+def test_load_early_detection_config_low_gt_high_raises(tmp_path: Path) -> None:
+    """A bound pair with low > high raises ValueError."""
+    from yield_risk.early_detection import load_early_detection_config
+
+    bad_yaml = tmp_path / "bad_bounds.yaml"
+    bad_yaml.write_text("missing_threshold: [0.8, 0.2]\n")
+    with pytest.raises(ValueError, match="missing_threshold"):
+        load_early_detection_config(bad_yaml)
+
+
+def test_load_early_detection_config_empty_model_families_raises(
+    tmp_path: Path,
+) -> None:
+    """Empty model_families list raises ValueError."""
+    from yield_risk.early_detection import load_early_detection_config
+
+    bad_yaml = tmp_path / "empty_fam.yaml"
+    bad_yaml.write_text("model_families: []\n")
+    with pytest.raises(ValueError, match="model_families"):
+        load_early_detection_config(bad_yaml)
+
+
+def test_load_early_detection_config_bad_detection_metric_raises(
+    tmp_path: Path,
+) -> None:
+    """An unrecognised detection_metric value raises ValueError."""
+    from yield_risk.early_detection import load_early_detection_config
+
+    bad_yaml = tmp_path / "bad_metric.yaml"
+    bad_yaml.write_text("detection_metric: accuracy\n")
+    with pytest.raises(ValueError, match="detection_metric"):
+        load_early_detection_config(bad_yaml)
+
+
+def test_load_early_detection_config_bad_threshold_policy_raises(
+    tmp_path: Path,
+) -> None:
+    """An unrecognised threshold_policy value raises ValueError."""
+    from yield_risk.early_detection import load_early_detection_config
+
+    bad_yaml = tmp_path / "bad_policy.yaml"
+    bad_yaml.write_text("threshold_policy: greedy\n")
+    with pytest.raises(ValueError, match="threshold_policy"):
+        load_early_detection_config(bad_yaml)
+
+
+def test_load_early_detection_config_overrides_applied_last(tmp_path: Path) -> None:
+    """CLI overrides are applied last and win over YAML values."""
+    from yield_risk.early_detection import load_early_detection_config
+
+    yaml_file = tmp_path / "cfg.yaml"
+    yaml_file.write_text("n_trials: 20\nsampler_seed: 7\n")
+    cfg = load_early_detection_config(yaml_file, overrides={"n_trials": 99})
+    assert cfg.n_trials == 99
+    assert cfg.sampler_seed == 7  # from YAML, not clobbered
+
+
+def test_load_early_detection_config_none_overrides_ignored(tmp_path: Path) -> None:
+    """None values in overrides dict do not clobber real config values."""
+    from yield_risk.early_detection import load_early_detection_config
+
+    yaml_file = tmp_path / "cfg.yaml"
+    yaml_file.write_text("n_trials: 30\n")
+    cfg = load_early_detection_config(
+        yaml_file, overrides={"n_trials": None, "sampler_seed": None}
+    )
+    assert cfg.n_trials == 30  # YAML value kept; None did not clobber
+    assert cfg.sampler_seed == 42  # default kept; None did not clobber
+
+
+def test_early_detection_config_is_frozen_dataclass() -> None:
+    """EarlyDetectionConfig is frozen — fields cannot be reassigned."""
+    from yield_risk.early_detection import load_early_detection_config
+
+    cfg = load_early_detection_config(
+        _YAML_PATH.parent / "__nonexistent__.yaml"
+    )
+    with pytest.raises(Exception):
+        cfg.n_trials = 999  # type: ignore[misc]
+
+
+def test_load_early_detection_config_n_trials_less_than_1_raises(
+    tmp_path: Path,
+) -> None:
+    """n_trials < 1 raises ValueError."""
+    from yield_risk.early_detection import load_early_detection_config
+
+    bad_yaml = tmp_path / "bad_trials.yaml"
+    bad_yaml.write_text("n_trials: 0\n")
+    with pytest.raises(ValueError, match="n_trials"):
+        load_early_detection_config(bad_yaml)
+
+
+def test_load_early_detection_config_inner_cv_folds_less_than_2_raises(
+    tmp_path: Path,
+) -> None:
+    """inner_cv_folds < 2 raises ValueError."""
+    from yield_risk.early_detection import load_early_detection_config
+
+    bad_yaml = tmp_path / "bad_folds.yaml"
+    bad_yaml.write_text("inner_cv_folds: 1\n")
+    with pytest.raises(ValueError, match="inner_cv_folds"):
+        load_early_detection_config(bad_yaml)
+
+
+def test_load_early_detection_config_empty_access_types_raises(
+    tmp_path: Path,
+) -> None:
+    """Empty access_types list raises ValueError."""
+    from yield_risk.early_detection import load_early_detection_config
+
+    bad_yaml = tmp_path / "bad_access.yaml"
+    bad_yaml.write_text("access_types: []\n")
+    with pytest.raises(ValueError, match="access_types"):
+        load_early_detection_config(bad_yaml)
+
+
+def test_load_early_detection_config_invalid_access_type_entry_raises(
+    tmp_path: Path,
+) -> None:
+    """An unrecognised entry in access_types raises ValueError."""
+    from yield_risk.early_detection import load_early_detection_config
+
+    bad_yaml = tmp_path / "bad_access_entry.yaml"
+    bad_yaml.write_text("access_types: [prefix, sliding]\n")
+    with pytest.raises(ValueError, match="access_types"):
+        load_early_detection_config(bad_yaml)
+
+
+def test_load_early_detection_config_invalid_model_family_raises(
+    tmp_path: Path,
+) -> None:
+    """A model family outside the four Spec-A families raises ValueError."""
+    from yield_risk.early_detection import load_early_detection_config
+
+    bad_yaml = tmp_path / "bad_family.yaml"
+    bad_yaml.write_text("model_families: [logistic_regression, neural_net]\n")
+    with pytest.raises(ValueError, match="model_families"):
+        load_early_detection_config(bad_yaml)
+
+
+def test_load_early_detection_config_empty_selection_methods_raises(
+    tmp_path: Path,
+) -> None:
+    """Empty selection_methods raises ValueError."""
+    from yield_risk.early_detection import load_early_detection_config
+
+    bad_yaml = tmp_path / "bad_sel.yaml"
+    bad_yaml.write_text("selection_methods: []\n")
+    with pytest.raises(ValueError, match="selection_methods"):
+        load_early_detection_config(bad_yaml)
+
+
+def test_load_early_detection_config_invalid_selection_method_raises(
+    tmp_path: Path,
+) -> None:
+    """An unrecognised selection method raises ValueError."""
+    from yield_risk.early_detection import load_early_detection_config
+
+    bad_yaml = tmp_path / "bad_sel_entry.yaml"
+    bad_yaml.write_text("selection_methods: [none, chi2]\n")
+    with pytest.raises(ValueError, match="selection_methods"):
+        load_early_detection_config(bad_yaml)
+
+
+# ---------------------------------------------------------------------------
 # Real-data sanity check (skipped unless SECOM data present)
 # ---------------------------------------------------------------------------
 

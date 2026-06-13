@@ -1,0 +1,19 @@
+n_trials: 100
+sampler_seed: 42
+inner_cv_folds: 5
+detection_metric: pr_auc        # pr_auc | recall_at_far | neg_balanced_error | neg_expected_cost
+alpha: 0.10                     # earliness penalty weight
+access_types: [prefix, window]
+min_window_size: 8
+max_window_size: 256
+model_families: [logistic_regression, random_forest, xgboost, lightgbm]
+missing_threshold: [0.2, 0.6]   # [low, high] search bounds
+variance_threshold: [1.0e-6, 1.0e-2]
+correlation_threshold: [0.85, 0.99]
+selection_methods: [none, univariate, mutual_info, model_importance]
+max_features: [10, 200]
+threshold_policy: tune          # tune | far_constraint
+threshold_range: [0.01, 0.80]
+false_alarm_rate: 0.10
+performance_tolerance: 0.05      # fraction of baseline primary metric (Spec C)
+curve_prefixes: [16, 32, 64, 128, 256, 512]

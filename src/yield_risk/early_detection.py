@@ -5,11 +5,14 @@ from __future__ import annotations
 import functools
 import math
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
+import yaml
 from lightgbm import LGBMClassifier
 from sklearn.base import ClassifierMixin
 from sklearn.ensemble import RandomForestClassifier
@@ -837,3 +840,334 @@ def evaluate_config(
             feasible=False,
             per_fold=per_fold_records,
         )
+
+
+# ---------------------------------------------------------------------------
+# EarlyDetectionConfig + load_early_detection_config  (Spec B §1)
+# ---------------------------------------------------------------------------
+
+_VALID_DETECTION_METRICS: frozenset[str] = frozenset(
+    {"pr_auc", "recall_at_far", "neg_balanced_error", "neg_expected_cost"}
+)
+_VALID_THRESHOLD_POLICIES: frozenset[str] = frozenset({"tune", "far_constraint"})
+_VALID_ACCESS_TYPES_CFG: frozenset[str] = frozenset({"prefix", "window"})
+_VALID_MODEL_FAMILIES: frozenset[str] = frozenset(
+    {
+        "logistic_regression",
+        "random_forest",
+        "xgboost",
+        "lightgbm",
+    }
+)
+_VALID_SELECTION_METHODS: frozenset[str] = frozenset(
+    {"none", "univariate", "mutual_info", "model_importance"}
+)
+
+# Tuple-field names whose YAML value is a [low, high] list.
+_TUPLE_FLOAT_FIELDS: frozenset[str] = frozenset(
+    {
+        "missing_threshold",
+        "variance_threshold",
+        "correlation_threshold",
+        "threshold_range",
+    }
+)
+_TUPLE_INT_FIELDS: frozenset[str] = frozenset({"max_features"})
+
+_DEFAULTS: dict[str, object] = {
+    "n_trials": 100,
+    "sampler_seed": 42,
+    "inner_cv_folds": 5,
+    "detection_metric": "pr_auc",
+    "alpha": 0.10,
+    "access_types": ["prefix", "window"],
+    "min_window_size": 8,
+    "max_window_size": 256,
+    "model_families": [
+        "logistic_regression",
+        "random_forest",
+        "xgboost",
+        "lightgbm",
+    ],
+    "missing_threshold": [0.2, 0.6],
+    "variance_threshold": [1.0e-6, 1.0e-2],
+    "correlation_threshold": [0.85, 0.99],
+    "selection_methods": ["none", "univariate", "mutual_info", "model_importance"],
+    "max_features": [10, 200],
+    "threshold_policy": "tune",
+    "threshold_range": [0.01, 0.80],
+    "false_alarm_rate": 0.10,
+    "performance_tolerance": 0.05,
+    "curve_prefixes": [16, 32, 64, 128, 256, 512],
+}
+
+_KNOWN_KEYS: frozenset[str] = frozenset(_DEFAULTS.keys())
+
+
+@dataclass(frozen=True)
+class EarlyDetectionConfig:
+    """Study-wide configuration for the Optuna early-detection experiment.
+
+    All fields are immutable once constructed.  Use ``load_early_detection_config``
+    to build an instance from a YAML file with optional CLI overrides.
+
+    Attributes:
+        n_trials: Number of Optuna trials to run.
+        sampler_seed: Random seed for the Optuna sampler.
+        inner_cv_folds: Number of folds for inner cross-validation scoring.
+        detection_metric: Primary scoring metric.  One of ``"pr_auc"``,
+            ``"recall_at_far"``, ``"neg_balanced_error"``,
+            ``"neg_expected_cost"``.
+        alpha: Earliness-penalty weight applied as
+            ``penalized_score = metric - alpha * obs_fraction``.
+        access_types: Which sensor-access strategies to consider.  Non-empty
+            subset of ``{"prefix", "window"}``.
+        min_window_size: Lower bound for ``window_size`` Optuna parameter.
+        max_window_size: Upper bound for ``window_size`` Optuna parameter.
+        model_families: Classifier families to sample from.  Non-empty subset
+            of the four Spec-A families.
+        missing_threshold: ``(low, high)`` search bounds for the missing-value
+            drop threshold.
+        variance_threshold: ``(low, high)`` search bounds for the variance
+            drop threshold.
+        correlation_threshold: ``(low, high)`` search bounds for the
+            correlation drop threshold.
+        selection_methods: Feature-selection strategies to sample from.
+            Non-empty subset of ``{"none", "univariate", "mutual_info",
+            "model_importance"}``.
+        max_features: ``(low, high)`` integer search bounds for feature count.
+        threshold_policy: Decision-threshold strategy applied study-wide.
+            Either ``"tune"`` or ``"far_constraint"``.
+        threshold_range: ``(low, high)`` search bounds for the tune-policy
+            threshold.
+        false_alarm_rate: Maximum tolerated false-alarm rate for the
+            ``"far_constraint"`` policy.
+        performance_tolerance: Fraction of baseline primary metric used by
+            Spec C curve analysis.
+        curve_prefixes: Prefix lengths at which Spec C reports learning curves.
+    """
+
+    n_trials: int
+    sampler_seed: int
+    inner_cv_folds: int
+    detection_metric: str
+    alpha: float
+    access_types: list[str]
+    min_window_size: int
+    max_window_size: int
+    model_families: list[str]
+    missing_threshold: tuple[float, float]
+    variance_threshold: tuple[float, float]
+    correlation_threshold: tuple[float, float]
+    selection_methods: list[str]
+    max_features: tuple[int, int]
+    threshold_policy: str
+    threshold_range: tuple[float, float]
+    false_alarm_rate: float
+    performance_tolerance: float
+    curve_prefixes: list[int]
+
+
+def load_early_detection_config(
+    path: Path | str = "configs/early_detection_config.yaml",
+    *,
+    overrides: Mapping[str, object] | None = None,
+) -> EarlyDetectionConfig:
+    """Load an ``EarlyDetectionConfig`` from a YAML file with optional overrides.
+
+    The loader merges values in priority order (lowest → highest):
+    1. Hard-coded defaults (equal to the shipped YAML).
+    2. Values from the YAML file (if the file exists; missing file uses defaults).
+    3. Non-``None`` entries from ``overrides`` (for CLI flags).
+
+    After merging, all values are validated and the four ``[low, high]`` list
+    fields are coerced to 2-tuples.
+
+    Args:
+        path: Filesystem path to the YAML configuration file.  Defaults to
+            ``"configs/early_detection_config.yaml"``.
+        overrides: Optional mapping of field-name → value applied on top of
+            the merged YAML.  ``None`` values are silently ignored so that
+            absent CLI flags do not clobber real config values.
+
+    Returns:
+        A validated, frozen ``EarlyDetectionConfig`` instance.
+
+    Raises:
+        ValueError: If the YAML contains unknown keys; if any bound pair has
+            ``low > high``; if ``detection_metric`` or ``threshold_policy`` is
+            not in the allowed set; if ``access_types``, ``model_families``, or
+            ``selection_methods`` is empty or contains invalid entries; if
+            ``n_trials < 1`` or ``inner_cv_folds < 2``.
+    """
+    resolved = Path(path)
+
+    # --- Step 1: start from defaults -----------------------------------------
+    merged: dict[str, object] = dict(_DEFAULTS)
+
+    # --- Step 2: overlay YAML (skip silently if file absent) -----------------
+    if resolved.exists():
+        with resolved.open("r", encoding="utf-8") as fh:
+            raw: object = yaml.safe_load(fh)
+        if raw is not None:
+            if not isinstance(raw, dict):
+                raise ValueError(
+                    "Expected a YAML mapping at the top level; "
+                    f"got {type(raw).__name__}"
+                )
+            yaml_dict: dict[str, object] = cast("dict[str, object]", raw)
+            unknown = set(yaml_dict.keys()) - _KNOWN_KEYS
+            if unknown:
+                raise ValueError(
+                    f"Unknown YAML key(s): {', '.join(sorted(unknown))}"
+                )
+            merged.update(yaml_dict)
+
+    # --- Step 3: overlay non-None overrides ----------------------------------
+    if overrides is not None:
+        for k, v in overrides.items():
+            if v is not None:
+                merged[k] = v
+
+    # --- Step 4: coerce tuple fields -----------------------------------------
+    def _to_float_tuple(name: str) -> tuple[float, float]:
+        """Coerce a two-element list or tuple to (float, float).
+
+        Args:
+            name: Field name in ``merged`` to read from.
+
+        Returns:
+            A ``(float, float)`` 2-tuple.
+
+        Raises:
+            ValueError: If the value is not a two-element sequence.
+        """
+        val = merged[name]
+        if not isinstance(val, (list, tuple)) or len(val) != 2:
+            raise ValueError(
+                f"'{name}' must be a two-element [low, high] list; got {val!r}"
+            )
+        seq = cast("list[Any]", val)
+        return (float(seq[0]), float(seq[1]))
+
+    def _to_int_tuple(name: str) -> tuple[int, int]:
+        """Coerce a two-element list or tuple to (int, int).
+
+        Args:
+            name: Field name in ``merged`` to read from.
+
+        Returns:
+            An ``(int, int)`` 2-tuple.
+
+        Raises:
+            ValueError: If the value is not a two-element sequence.
+        """
+        val = merged[name]
+        if not isinstance(val, (list, tuple)) or len(val) != 2:
+            raise ValueError(
+                f"'{name}' must be a two-element [low, high] list; got {val!r}"
+            )
+        seq = cast("list[Any]", val)
+        return (int(seq[0]), int(seq[1]))
+
+    missing_threshold = _to_float_tuple("missing_threshold")
+    variance_threshold = _to_float_tuple("variance_threshold")
+    correlation_threshold = _to_float_tuple("correlation_threshold")
+    threshold_range = _to_float_tuple("threshold_range")
+    max_features = _to_int_tuple("max_features")
+
+    # --- Step 5: extract scalar fields ---------------------------------------
+    n_trials = int(cast("Any", merged["n_trials"]))
+    sampler_seed = int(cast("Any", merged["sampler_seed"]))
+    inner_cv_folds = int(cast("Any", merged["inner_cv_folds"]))
+    detection_metric = str(merged["detection_metric"])
+    alpha = float(cast("Any", merged["alpha"]))
+    access_types: list[str] = list(cast("Any", merged["access_types"]))
+    min_window_size = int(cast("Any", merged["min_window_size"]))
+    max_window_size = int(cast("Any", merged["max_window_size"]))
+    model_families: list[str] = list(cast("Any", merged["model_families"]))
+    selection_methods: list[str] = list(cast("Any", merged["selection_methods"]))
+    threshold_policy = str(merged["threshold_policy"])
+    false_alarm_rate = float(cast("Any", merged["false_alarm_rate"]))
+    performance_tolerance = float(cast("Any", merged["performance_tolerance"]))
+    curve_prefixes: list[int] = [
+        int(x) for x in cast("list[Any]", merged["curve_prefixes"])
+    ]
+
+    # --- Step 6: validate ----------------------------------------------------
+    if n_trials < 1:
+        raise ValueError(f"n_trials must be >= 1; got {n_trials}")
+    if inner_cv_folds < 2:
+        raise ValueError(f"inner_cv_folds must be >= 2; got {inner_cv_folds}")
+    if detection_metric not in _VALID_DETECTION_METRICS:
+        raise ValueError(
+            f"detection_metric {detection_metric!r} is not valid. "
+            f"Expected one of {sorted(_VALID_DETECTION_METRICS)}."
+        )
+    if threshold_policy not in _VALID_THRESHOLD_POLICIES:
+        raise ValueError(
+            f"threshold_policy {threshold_policy!r} is not valid. "
+            f"Expected one of {sorted(_VALID_THRESHOLD_POLICIES)}."
+        )
+    if not access_types:
+        raise ValueError("access_types must be non-empty.")
+    invalid_access = set(access_types) - _VALID_ACCESS_TYPES_CFG
+    if invalid_access:
+        raise ValueError(
+            f"access_types contains invalid entries: {sorted(invalid_access)}. "
+            f"Expected subset of {sorted(_VALID_ACCESS_TYPES_CFG)}."
+        )
+    if not model_families:
+        raise ValueError("model_families must be non-empty.")
+    invalid_fam = set(model_families) - _VALID_MODEL_FAMILIES
+    if invalid_fam:
+        raise ValueError(
+            f"model_families contains invalid entries: {sorted(invalid_fam)}. "
+            f"Expected subset of {sorted(_VALID_MODEL_FAMILIES)}."
+        )
+    if not selection_methods:
+        raise ValueError("selection_methods must be non-empty.")
+    invalid_sel = set(selection_methods) - _VALID_SELECTION_METHODS
+    if invalid_sel:
+        raise ValueError(
+            f"selection_methods contains invalid entries: {sorted(invalid_sel)}. "
+            f"Expected subset of {sorted(_VALID_SELECTION_METHODS)}."
+        )
+    # Bound-pair low <= high checks
+    for name, (low, high) in (
+        ("missing_threshold", missing_threshold),
+        ("variance_threshold", variance_threshold),
+        ("correlation_threshold", correlation_threshold),
+        ("threshold_range", threshold_range),
+    ):
+        if low > high:
+            raise ValueError(
+                f"'{name}' requires low <= high; got ({low}, {high})."
+            )
+    mf_low, mf_high = max_features
+    if mf_low > mf_high:
+        raise ValueError(
+            f"'max_features' requires low <= high; got ({mf_low}, {mf_high})."
+        )
+
+    return EarlyDetectionConfig(
+        n_trials=n_trials,
+        sampler_seed=sampler_seed,
+        inner_cv_folds=inner_cv_folds,
+        detection_metric=detection_metric,
+        alpha=alpha,
+        access_types=access_types,
+        min_window_size=min_window_size,
+        max_window_size=max_window_size,
+        model_families=model_families,
+        missing_threshold=missing_threshold,
+        variance_threshold=variance_threshold,
+        correlation_threshold=correlation_threshold,
+        selection_methods=selection_methods,
+        max_features=max_features,
+        threshold_policy=threshold_policy,
+        threshold_range=threshold_range,
+        false_alarm_rate=false_alarm_rate,
+        performance_tolerance=performance_tolerance,
+        curve_prefixes=curve_prefixes,
+    )
