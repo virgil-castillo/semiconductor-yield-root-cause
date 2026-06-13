@@ -19,7 +19,8 @@ def load_secom(raw_dir: Path) -> pd.DataFrame:
 
     Returns:
         DataFrame with columns ``sensor_000``...``sensor_N``, ``label`` (0/1),
-        and ``timestamp``, indexed by zero-based integer row position.
+        and ``timestamp`` (``datetime64[ns]``, day-first parsed, row order
+        preserved), indexed by zero-based integer row position.
 
     Raises:
         FileNotFoundError: If either data file is absent from *raw_dir*.
@@ -40,14 +41,15 @@ def load_secom(raw_dir: Path) -> pd.DataFrame:
         header=None,
         engine="python",
     )
+    raw_ts = (
+        raw_labels.iloc[:, 1].astype(str)
+        + " "
+        + raw_labels.iloc[:, 2].astype(str)
+    ).str.replace('"', "", regex=False)
     labels = pd.DataFrame(
         {
             "label": (raw_labels.iloc[:, 0] == 1).astype(int),
-            "timestamp": (
-                raw_labels.iloc[:, 1].astype(str)
-                + " "
-                + raw_labels.iloc[:, 2].astype(str)
-            ),
+            "timestamp": pd.to_datetime(raw_ts, dayfirst=True),
         }
     )
 

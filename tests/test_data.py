@@ -25,11 +25,11 @@ def raw_dir(tmp_path: Path) -> Path:
         "13.0 14.0 NaN\n"
     )
     (raw / "secom_labels.data").write_text(
-        "-1 2008-11-18 01:00:00\n"
-        "1 2008-11-18 02:00:00\n"
-        "-1 2008-11-18 03:00:00\n"
-        "-1 2008-11-18 04:00:00\n"
-        "1 2008-11-18 05:00:00\n"
+        '-1 "18/11/2008 01:00:00"\n'
+        '1 "18/11/2008 02:00:00"\n'
+        '-1 "18/11/2008 03:00:00"\n'
+        '-1 "18/11/2008 04:00:00"\n'
+        '1 "18/11/2008 05:00:00"\n'
     )
     return raw
 
@@ -71,6 +71,17 @@ class TestLoadSecom:
 
     def test_row_index_unique(self, raw_dir: Path) -> None:
         assert load_secom(raw_dir).index.is_unique
+
+    def test_timestamp_is_datetime64_dtype(self, raw_dir: Path) -> None:
+        df = load_secom(raw_dir)
+        assert pd.api.types.is_datetime64_any_dtype(df["timestamp"])
+
+    def test_timestamp_dayfirst_parsing(self, raw_dir: Path) -> None:
+        """A day-first value like 18/11/2008 must yield month=11, day=18."""
+        df = load_secom(raw_dir)
+        ts = df["timestamp"].iloc[0]
+        assert ts.month == 11  # noqa: PLR2004
+        assert ts.day == 18  # noqa: PLR2004
 
 
 class TestValidateSecom:
