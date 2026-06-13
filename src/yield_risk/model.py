@@ -15,7 +15,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.model_selection import (
     RandomizedSearchCV,
-    TimeSeriesSplit,
+    StratifiedKFold,
     cross_val_score,
     cross_validate,
 )
@@ -75,26 +75,28 @@ def train_model(
 
 def _check_positive_per_fold(
     y: pd.Series,
-    cv: TimeSeriesSplit,
+    cv: StratifiedKFold,
 ) -> None:
     """Raise ValueError if any validation fold contains zero positive examples.
 
     Args:
-        y: Label series in time order.
-        cv: TimeSeriesSplit splitter to check.
+        y: Label series.
+        cv: StratifiedKFold splitter to check.
 
     Raises:
         ValueError: If a validation fold has no positive examples, naming the
             zero-indexed fold number.
     """
     y_arr = np.asarray(y)
-    for fold_idx, (_, val_idx) in enumerate(cv.split(y_arr)):
+    for fold_idx, (_, val_idx) in enumerate(
+        cv.split(np.zeros(len(y_arr)), y_arr)
+    ):
         n_pos = int((y_arr[val_idx] == 1).sum())
         if n_pos == 0:
             raise ValueError(
                 f"Fold {fold_idx} validation split contains zero positive "
                 "examples. PR-AUC is undefined. Ensure positives are spread "
-                "across the full time axis before calling cross-validation."
+                "across the dataset before calling cross-validation."
             )
 
 
@@ -105,20 +107,17 @@ def cross_validate_model(
     cv_folds: int,
     random_seed: int,
 ) -> dict[str, np.ndarray]:
-    """Run forward-chaining time-series cross-validation and return per-fold scores.
+    """Run stratified k-fold cross-validation and return per-fold scores.
 
-    Uses ``TimeSeriesSplit`` (no shuffle, no stratification). Callers must pass
-    ``X``/``y`` in time order; the earliest rows form the first training block.
-    ``random_seed`` is retained in the signature for caller API compatibility but
-    is not consumed by ``TimeSeriesSplit`` (which has no ``random_state``).
+    Uses ``StratifiedKFold`` with shuffle enabled. The ``random_seed``
+    parameter controls the shuffle so results are reproducible.
 
     Args:
         pipeline: sklearn Pipeline (fitted or unfitted; cloned internally).
-        X: Feature matrix in time order.
-        y: Labels in time order.
-        cv_folds: Number of forward-chaining folds.
-        random_seed: Unused — kept for API compatibility with callers that pass
-            a seed for reproducibility.
+        X: Feature matrix.
+        y: Labels (0/1).
+        cv_folds: Number of stratified folds.
+        random_seed: Random state for the ``StratifiedKFold`` shuffle.
 
     Returns:
         Dict with keys "test_roc_auc" and "test_f1", each a numpy array
@@ -127,8 +126,7 @@ def cross_validate_model(
     Raises:
         ValueError: If any validation fold contains zero positive examples.
     """
-    _ = random_seed  # retained for API compatibility; TimeSeriesSplit has no RNG
-    cv = TimeSeriesSplit(n_splits=cv_folds)
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_seed)
     _check_positive_per_fold(y, cv)
     results = cross_validate(
         pipeline, X, y, cv=cv, scoring=["roc_auc", "f1"]
@@ -141,8 +139,9 @@ def compute_fold_diagnostics(
     X: pd.DataFrame,
     y: pd.Series,
     cv_folds: int,
+    random_seed: int,
 ) -> list[dict[str, float | int]]:
-    """Compute per-fold validation diagnostics using forward-chaining CV.
+    """Compute per-fold validation diagnostics using stratified k-fold CV.
 
     Clones the estimator for each fold, fits on the training indices, and
     evaluates on the validation indices. Raises before any fitting if any
@@ -151,9 +150,11 @@ def compute_fold_diagnostics(
     Args:
         estimator: Unfitted (or previously fitted) sklearn Pipeline. It is
             cloned internally; the original is not mutated.
-        X: Feature matrix in time order.
-        y: Labels (0/1) in time order.
-        cv_folds: Number of forward-chaining folds for ``TimeSeriesSplit``.
+        X: Feature matrix.
+        y: Labels (0/1).
+        cv_folds: Number of stratified folds for ``StratifiedKFold``.
+        random_seed: Random state for the ``StratifiedKFold`` shuffle,
+            ensuring reproducible fold assignments.
 
     Returns:
         List of length ``cv_folds``. Each dict has keys:
@@ -169,14 +170,14 @@ def compute_fold_diagnostics(
         ValueError: If any validation fold contains zero positive examples
             (PR-AUC is undefined in that case).
     """
-    cv = TimeSeriesSplit(n_splits=cv_folds)
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_seed)
     _check_positive_per_fold(y, cv)
 
     diagnostics: list[dict[str, float | int]] = []
     y_arr = np.asarray(y)
     X_vals = X.values
 
-    for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X_vals)):
+    for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X_vals, y_arr)):
         X_train_fold = X.iloc[train_idx]
         y_train_fold = y.iloc[train_idx]
         X_val_fold = X.iloc[val_idx]
@@ -381,11 +382,10 @@ def selection_score(result: SearchResult, std_penalty: float = 1.0) -> float:
         score = cv_pr_auc_mean - std_penalty * cv_pr_auc_std
 
     Penalizing the mean by the per-fold standard deviation rewards families
-    whose performance is *consistent* across the forward-chaining folds and
-    discounts families whose mean is propped up by a single lucky fold. With
-    ``TimeSeriesSplit`` the smallest, most positive-sparse validation folds can
-    produce large PR-AUC spikes that dominate a plain mean even when every other
-    fold is mediocre; subtracting the std collapses that advantage.
+    whose performance is *consistent* across the stratified folds and
+    discounts families whose mean is propped up by a single lucky fold.
+    Subtracting the std collapses the advantage of high-variance families
+    whose mean is inflated by one unusually favorable fold assignment.
 
     Args:
         result: A single family's search result.
@@ -403,13 +403,11 @@ def select_best(results: list[SearchResult], std_penalty: float = 1.0) -> str:
     """Return the family name with the best std-penalized cross-validated PR-AUC.
 
     Selection uses a lower-confidence bound, ``cv_pr_auc_mean -
-    std_penalty * cv_pr_auc_std`` (see :func:`selection_score`), rather than the
-    raw mean. Under forward-chaining ``TimeSeriesSplit`` CV, the smallest and
-    most positive-sparse validation fold can hand a single family a large PR-AUC
-    spike that inflates its mean while every other fold is unremarkable. Ranking
-    on the mean alone then selects an essentially-random model whose held-out
-    generalization is poor. Subtracting the per-fold standard deviation favors
-    the family with the most stable per-fold performance, which empirically
+    std_penalty * cv_pr_auc_std`` (see :func:`selection_score`), rather than
+    the raw mean. Ranking on the raw mean can select a family whose high average
+    is driven by a single lucky fold while every other fold is mediocre.
+    Subtracting the per-fold standard deviation favors the family with the most
+    consistent per-fold PR-AUC across the stratified folds, which empirically
     tracks held-out generalization far better.
 
     Ties break toward the family appearing first in *results* (which callers
@@ -443,11 +441,11 @@ def run_search(
     correlation_threshold: float,
     n_jobs: int = -1,
 ) -> SearchResult:
-    """Tune one model family with forward-chaining CV PR-AUC and refit the winner.
+    """Tune one model family with stratified CV PR-AUC and refit the winner.
 
-    Uses ``TimeSeriesSplit`` for both hyperparameter search and the dummy
-    baseline. Callers must pass ``X``/``y`` in time order. Raises if any
-    validation fold contains zero positive examples.
+    Uses ``StratifiedKFold`` (shuffle=True) for both hyperparameter search and
+    the dummy baseline. Raises if any validation fold contains zero positive
+    examples.
 
     Tunable families are searched with ``RandomizedSearchCV``; ``n_iter`` is
     capped at the size of the discrete grid so small grids do not raise. The
@@ -457,11 +455,12 @@ def run_search(
 
     Args:
         name: Registered family identifier.
-        X: Training feature matrix in time order.
-        y: Training labels (0/1) in time order.
+        X: Training feature matrix.
+        y: Training labels (0/1).
         model_cfg: Parsed model_config.yaml (keys ``models`` and ``search``).
-        cv_folds: Number of forward-chaining folds.
-        random_seed: Random state for the estimator and RandomizedSearchCV.
+        cv_folds: Number of stratified folds.
+        random_seed: Random state for the estimator, the StratifiedKFold
+            shuffle, and RandomizedSearchCV.
         missing_threshold: Passed through to build_pipeline / SecomPreprocessor.
         variance_threshold: Passed through to build_pipeline / SecomPreprocessor.
         correlation_threshold: Passed through to build_pipeline / SecomPreprocessor.
@@ -481,7 +480,7 @@ def run_search(
         variance_threshold=variance_threshold,
         correlation_threshold=correlation_threshold,
     )
-    cv = TimeSeriesSplit(n_splits=cv_folds)
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_seed)
     _check_positive_per_fold(y, cv)
 
     if name == "xgboost":

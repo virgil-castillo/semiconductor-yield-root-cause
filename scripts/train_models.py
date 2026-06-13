@@ -55,7 +55,7 @@ def main() -> None:
             f"+/- {result.cv_pr_auc_std:.3f}"
         )
         folds = compute_fold_diagnostics(
-            result.estimator, X_train, y_train, cfg.run.cv_folds
+            result.estimator, X_train, y_train, cfg.run.cv_folds, cfg.run.random_seed
         )
         for fd in folds:
             print(
