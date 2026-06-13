@@ -127,6 +127,10 @@ def main(argv: list[str] | None = None) -> None:
     if ed_cfg.detection_metric == "neg_expected_cost":
         cost_matrix = load_cost_config().cost_matrix
 
+    # Create output directories before the study runs
+    cfg.paths.models_dir.mkdir(parents=True, exist_ok=True)
+    cfg.paths.reports_dir.mkdir(parents=True, exist_ok=True)
+
     # Run Optuna study
     study = run_study(
         x_train,
@@ -136,10 +140,6 @@ def main(argv: list[str] | None = None) -> None:
         random_seed=cfg.run.random_seed,
         cost_matrix=cost_matrix,
     )
-
-    # Create output directories
-    cfg.paths.models_dir.mkdir(parents=True, exist_ok=True)
-    cfg.paths.reports_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Artifact 1: serialised study ----------------------------------------
     study_path = cfg.paths.models_dir / "early_detection_study.pkl"
