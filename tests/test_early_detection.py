@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -2269,3 +2270,280 @@ def test_suggest_config_preprocessing_fields_in_bounds() -> None:
     assert lo <= cfg.variance_threshold <= hi
     lo, hi = ed_cfg.correlation_threshold
     assert lo <= cfg.correlation_threshold <= hi
+
+
+# ---------------------------------------------------------------------------
+# run_study tests (Spec B §3)
+# ---------------------------------------------------------------------------
+
+
+def _make_ed_cfg_for_run_study(
+    n_trials: int = 3,
+    inner_cv_folds: int = 2,
+    detection_metric: str = "pr_auc",
+    n_sensors: int = 10,
+) -> EarlyDetectionConfig:
+    """Return a minimal EarlyDetectionConfig for run_study tests.
+
+    Args:
+        n_trials: Number of Optuna trials.
+        inner_cv_folds: Number of inner CV folds.
+        detection_metric: Primary scoring metric.
+        n_sensors: Used to set max_window_size sensibly.
+
+    Returns:
+        An EarlyDetectionConfig ready for run_study.
+    """
+    return EarlyDetectionConfig(
+        n_trials=n_trials,
+        sampler_seed=7,
+        inner_cv_folds=inner_cv_folds,
+        detection_metric=detection_metric,
+        alpha=0.1,
+        access_types=["prefix"],
+        min_window_size=2,
+        max_window_size=n_sensors,
+        model_families=["random_forest"],
+        missing_threshold=(0.2, 0.9),
+        variance_threshold=(1e-6, 1e-2),
+        correlation_threshold=(0.85, 0.99),
+        selection_methods=["none"],
+        max_features=(2, n_sensors),
+        threshold_policy="tune",
+        threshold_range=(0.1, 0.8),
+        false_alarm_rate=0.1,
+        performance_tolerance=0.05,
+        curve_prefixes=[16, 32],
+    )
+
+
+def _make_run_study_data(
+    n_rows: int = 80,
+    n_sensors: int = 10,
+    seed: int = 42,
+) -> tuple[pd.DataFrame, np.ndarray, list[str]]:
+    """Return synthetic training data for run_study tests.
+
+    Args:
+        n_rows: Number of samples.
+        n_sensors: Number of sensor columns.
+        seed: RNG seed.
+
+    Returns:
+        Tuple of (x_train, y_train, raw_sensor_cols).
+    """
+    rng = np.random.default_rng(seed)
+    raw_sensor_cols = [f"sensor_{i:03d}" for i in range(n_sensors)]
+    x = pd.DataFrame(
+        {col: rng.standard_normal(n_rows) for col in raw_sensor_cols}
+    )
+    y = (rng.random(n_rows) < 0.35).astype(int)
+    return x, y, raw_sensor_cols
+
+
+def test_run_study_returns_optuna_study() -> None:
+    """run_study returns an optuna.Study instance."""
+    from yield_risk.early_detection import run_study
+
+    x, y, raw_sensor_cols = _make_run_study_data()
+    ed_cfg = _make_ed_cfg_for_run_study(n_trials=2)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = run_study(
+            x, y, raw_sensor_cols, ed_cfg, random_seed=0
+        )
+
+    assert isinstance(study, optuna.Study)
+
+
+def test_run_study_trial_count_matches_n_trials() -> None:
+    """run_study produces exactly n_trials trials."""
+    from yield_risk.early_detection import run_study
+
+    n_trials = 3
+    x, y, raw_sensor_cols = _make_run_study_data()
+    ed_cfg = _make_ed_cfg_for_run_study(n_trials=n_trials)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = run_study(
+            x, y, raw_sensor_cols, ed_cfg, random_seed=0
+        )
+
+    assert len(study.trials) == n_trials
+
+
+def test_run_study_trials_carry_all_documented_user_attrs() -> None:
+    """Every trial in the study has all seven documented user attrs."""
+    from yield_risk.early_detection import run_study
+
+    x, y, raw_sensor_cols = _make_run_study_data()
+    ed_cfg = _make_ed_cfg_for_run_study(n_trials=2)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = run_study(
+            x, y, raw_sensor_cols, ed_cfg, random_seed=0
+        )
+
+    expected_attrs = {
+        "detection_metric",
+        "observation_fraction",
+        "n_features_selected",
+        "feasible",
+        "access_type",
+        "latest_index",
+        "model_family",
+    }
+    for trial in study.trials:
+        assert expected_attrs <= set(trial.user_attrs.keys()), (
+            f"Trial {trial.number} missing attrs: "
+            f"{expected_attrs - set(trial.user_attrs.keys())}"
+        )
+
+
+def test_run_study_infeasible_trials_score_floor() -> None:
+    """Infeasible trials (feasible=False) score exactly EARLY_DETECTION_FLOOR.
+
+    Any trial whose user_attr 'feasible' is False must have value equal to
+    EARLY_DETECTION_FLOOR (-1.0).
+    """
+    from yield_risk.early_detection import EARLY_DETECTION_FLOOR, run_study
+
+    x, y, raw_sensor_cols = _make_run_study_data()
+    ed_cfg = _make_ed_cfg_for_run_study(n_trials=3)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = run_study(
+            x, y, raw_sensor_cols, ed_cfg, random_seed=0
+        )
+
+    for trial in study.trials:
+        if not trial.user_attrs.get("feasible", True):
+            assert trial.value == EARLY_DETECTION_FLOOR, (
+                f"Trial {trial.number}: infeasible trial value "
+                f"{trial.value} != {EARLY_DETECTION_FLOOR}"
+            )
+
+
+def test_run_study_infeasible_no_raise() -> None:
+    """run_study completes without raising even when all trials are infeasible.
+
+    Forces infeasibility via variance_threshold so large all columns are dropped.
+    """
+    from yield_risk.early_detection import EARLY_DETECTION_FLOOR, run_study
+
+    x, y, raw_sensor_cols = _make_run_study_data()
+    # Huge variance_threshold: all columns dropped → all trials infeasible
+    ed_cfg = EarlyDetectionConfig(
+        n_trials=3,
+        sampler_seed=7,
+        inner_cv_folds=2,
+        detection_metric="pr_auc",
+        alpha=0.1,
+        access_types=["prefix"],
+        min_window_size=2,
+        max_window_size=10,
+        model_families=["random_forest"],
+        missing_threshold=(0.2, 0.9),
+        variance_threshold=(1e10, 2e10),  # so large all columns dropped
+        correlation_threshold=(0.85, 0.99),
+        selection_methods=["none"],
+        max_features=(2, 10),
+        threshold_policy="tune",
+        threshold_range=(0.1, 0.8),
+        false_alarm_rate=0.1,
+        performance_tolerance=0.05,
+        curve_prefixes=[16, 32],
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        # Must not raise
+        study = run_study(
+            x, y, raw_sensor_cols, ed_cfg, random_seed=0
+        )
+
+    assert len(study.trials) == 3
+    for trial in study.trials:
+        assert trial.value == EARLY_DETECTION_FLOOR
+
+
+def test_run_study_determinism() -> None:
+    """Two run_study calls with identical inputs produce identical results.
+
+    Same best_params, same best_value, and same per-trial (value, params) pairs.
+    """
+    from yield_risk.early_detection import run_study
+
+    x, y, raw_sensor_cols = _make_run_study_data()
+    ed_cfg = _make_ed_cfg_for_run_study(n_trials=4)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study1 = run_study(x, y, raw_sensor_cols, ed_cfg, random_seed=0)
+        study2 = run_study(x, y, raw_sensor_cols, ed_cfg, random_seed=0)
+
+    assert study1.best_value == pytest.approx(study2.best_value)
+    assert study1.best_params == study2.best_params
+
+    for t1, t2 in zip(study1.trials, study2.trials):
+        assert t1.value == pytest.approx(t2.value), (
+            f"Trial {t1.number}: values differ {t1.value} vs {t2.value}"
+        )
+        assert t1.params == t2.params, (
+            f"Trial {t1.number}: params differ"
+        )
+
+
+def test_run_study_neg_expected_cost_without_cost_matrix_raises() -> None:
+    """run_study raises ValueError for neg_expected_cost without cost_matrix."""
+    from yield_risk.early_detection import run_study
+
+    x, y, raw_sensor_cols = _make_run_study_data()
+    ed_cfg = _make_ed_cfg_for_run_study(
+        n_trials=2, detection_metric="neg_expected_cost"
+    )
+
+    with pytest.raises(ValueError, match="cost_matrix"):
+        run_study(
+            x, y, raw_sensor_cols, ed_cfg, random_seed=0, cost_matrix=None
+        )
+
+
+def test_run_study_user_attr_types_are_correct() -> None:
+    """User attrs on every trial have correct Python types.
+
+    detection_metric: float (may be nan), observation_fraction: float,
+    n_features_selected: float, feasible: bool,
+    access_type: str, latest_index: int, model_family: str.
+    """
+    from yield_risk.early_detection import run_study
+
+    x, y, raw_sensor_cols = _make_run_study_data()
+    ed_cfg = _make_ed_cfg_for_run_study(n_trials=3)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = run_study(
+            x, y, raw_sensor_cols, ed_cfg, random_seed=0
+        )
+
+    for trial in study.trials:
+        attrs = trial.user_attrs
+        assert isinstance(attrs["detection_metric"], float)
+        assert isinstance(attrs["observation_fraction"], float)
+        assert isinstance(attrs["n_features_selected"], float)
+        assert isinstance(attrs["feasible"], bool)
+        assert isinstance(attrs["access_type"], str)
+        assert isinstance(attrs["latest_index"], int)
+        assert isinstance(attrs["model_family"], str)

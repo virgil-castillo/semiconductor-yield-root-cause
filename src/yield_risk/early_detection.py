@@ -1325,3 +1325,79 @@ def suggest_config(
         threshold=threshold,
         false_alarm_rate=false_alarm_rate,
     )
+
+
+def run_study(
+    x_train: pd.DataFrame,
+    y_train: np.ndarray,
+    raw_sensor_cols: list[str],
+    ed_cfg: EarlyDetectionConfig,
+    *,
+    random_seed: int,
+    cost_matrix: CostMatrix | None = None,
+) -> optuna.Study:
+    """Run an Optuna hyperparameter search for early-detection scoring.
+
+    Args:
+        x_train: Training feature DataFrame containing all ``raw_sensor_cols``.
+        y_train: Binary class labels aligned with ``x_train``, shape ``(n,)``.
+        raw_sensor_cols: Ordered list of all raw sensor column names.
+        ed_cfg: Study-wide configuration (sampler seed, n_trials, etc.).
+        random_seed: Seed for ``evaluate_config`` inner CV and estimators.
+        cost_matrix: Required when ``ed_cfg.detection_metric ==
+            "neg_expected_cost"``; raises ``ValueError`` if ``None`` in that
+            case.
+
+    Returns:
+        The completed ``optuna.Study`` with ``len(study.trials) == ed_cfg.n_trials``.
+        Every trial carries user attrs: ``detection_metric``,
+        ``observation_fraction``, ``n_features_selected``, ``feasible``,
+        ``access_type``, ``latest_index``, ``model_family``.
+
+    Raises:
+        ValueError: If ``ed_cfg.detection_metric == "neg_expected_cost"`` and
+            ``cost_matrix`` is ``None``.
+    """
+    if ed_cfg.detection_metric == "neg_expected_cost" and cost_matrix is None:
+        raise ValueError(
+            "cost_matrix must be provided when detection_metric == "
+            "'neg_expected_cost'."
+        )
+
+    sampler = optuna.samplers.TPESampler(seed=ed_cfg.sampler_seed)
+    study = optuna.create_study(direction="maximize", sampler=sampler)
+
+    n_sensors = len(raw_sensor_cols)
+
+    def objective(trial: optuna.Trial) -> float:
+        """Optuna objective: score one HyperparamConfig via CV.
+
+        Args:
+            trial: The Optuna trial providing ``suggest_*`` methods.
+
+        Returns:
+            ``score.penalized_score`` for this trial.
+        """
+        cfg = suggest_config(trial, ed_cfg, n_sensors)
+        score = evaluate_config(
+            x_train,
+            y_train,
+            raw_sensor_cols,
+            cfg,
+            inner_cv_folds=ed_cfg.inner_cv_folds,
+            alpha=ed_cfg.alpha,
+            detection_metric=ed_cfg.detection_metric,
+            random_seed=random_seed,
+            cost_matrix=cost_matrix,
+        )
+        trial.set_user_attr("detection_metric", score.detection_metric)
+        trial.set_user_attr("observation_fraction", score.observation_fraction)
+        trial.set_user_attr("n_features_selected", score.n_features_selected)
+        trial.set_user_attr("feasible", score.feasible)
+        trial.set_user_attr("access_type", cfg.access.access_type)
+        trial.set_user_attr("latest_index", latest_index(cfg.access, n_sensors))
+        trial.set_user_attr("model_family", cfg.model_family)
+        return score.penalized_score
+
+    study.optimize(objective, n_trials=ed_cfg.n_trials, n_jobs=1)
+    return study
