@@ -38,6 +38,9 @@ def main() -> None:
             model_cfg,
             cfg.run.cv_folds,
             cfg.run.random_seed,
+            cfg.run.missing_threshold,
+            cfg.run.variance_threshold,
+            cfg.run.correlation_threshold,
         )
         print(
             f"  CV PR-AUC: {result.cv_pr_auc_mean:.3f} "

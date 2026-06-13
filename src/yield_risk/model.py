@@ -14,13 +14,15 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import (
     RandomizedSearchCV,
-    StratifiedKFold,
+    TimeSeriesSplit,
     cross_val_score,
     cross_validate,
 )
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
+
+from yield_risk.preprocess import SecomPreprocessor
 
 
 def build_baseline_pipeline(random_seed: int) -> Pipeline:
@@ -70,6 +72,31 @@ def train_model(
     return pipeline
 
 
+def _check_positive_per_fold(
+    y: pd.Series,
+    cv: TimeSeriesSplit,
+) -> None:
+    """Raise ValueError if any validation fold contains zero positive examples.
+
+    Args:
+        y: Label series in time order.
+        cv: TimeSeriesSplit splitter to check.
+
+    Raises:
+        ValueError: If a validation fold has no positive examples, naming the
+            zero-indexed fold number.
+    """
+    y_arr = np.asarray(y)
+    for fold_idx, (_, val_idx) in enumerate(cv.split(y_arr)):
+        n_pos = int((y_arr[val_idx] == 1).sum())
+        if n_pos == 0:
+            raise ValueError(
+                f"Fold {fold_idx} validation split contains zero positive "
+                "examples. PR-AUC is undefined. Ensure positives are spread "
+                "across the full time axis before calling cross-validation."
+            )
+
+
 def cross_validate_model(
     pipeline: Pipeline,
     X: pd.DataFrame,
@@ -77,25 +104,31 @@ def cross_validate_model(
     cv_folds: int,
     random_seed: int,
 ) -> dict[str, np.ndarray]:
-    """Run stratified k-fold cross-validation and return per-fold scores.
+    """Run forward-chaining time-series cross-validation and return per-fold scores.
 
-    Uses sklearn.model_selection.cross_validate with
-    scoring=["roc_auc", "f1"]. The pipeline is cloned internally per fold.
+    Uses ``TimeSeriesSplit`` (no shuffle, no stratification). Callers must pass
+    ``X``/``y`` in time order; the earliest rows form the first training block.
+    ``random_seed`` is retained in the signature for caller API compatibility but
+    is not consumed by ``TimeSeriesSplit`` (which has no ``random_state``).
 
     Args:
         pipeline: sklearn Pipeline (fitted or unfitted; cloned internally).
-        X: Feature matrix.
-        y: Labels.
-        cv_folds: Number of stratified folds.
-        random_seed: Random state for StratifiedKFold.
+        X: Feature matrix in time order.
+        y: Labels in time order.
+        cv_folds: Number of forward-chaining folds.
+        random_seed: Unused — kept for API compatibility with callers that pass
+            a seed for reproducibility.
 
     Returns:
         Dict with keys "test_roc_auc" and "test_f1", each a numpy array
         of length cv_folds.
+
+    Raises:
+        ValueError: If any validation fold contains zero positive examples.
     """
-    cv = StratifiedKFold(
-        n_splits=cv_folds, shuffle=True, random_state=random_seed
-    )
+    _ = random_seed  # retained for API compatibility; TimeSeriesSplit has no RNG
+    cv = TimeSeriesSplit(n_splits=cv_folds)
+    _check_positive_per_fold(y, cv)
     results = cross_validate(
         pipeline, X, y, cv=cv, scoring=["roc_auc", "f1"]
     )
@@ -173,16 +206,28 @@ MODEL_REGISTRY: dict[str, FamilySpec] = {
 }
 
 
-def build_pipeline(name: str, random_seed: int) -> Pipeline:
+def build_pipeline(
+    name: str,
+    random_seed: int,
+    missing_threshold: float,
+    variance_threshold: float,
+    correlation_threshold: float,
+) -> Pipeline:
     """Build an unfitted pipeline for a registered model family.
 
-    Adds a StandardScaler step only for families that require scaling. The
-    final step is always named "classifier", so the explainability code's
-    pre-final transform logic continues to work.
+    Prepends a ``SecomPreprocessor`` step (named ``"preprocess"``) for every
+    family. Adds a ``StandardScaler`` step only for families that require
+    scaling. Step order: ``preprocess`` → (``scaler``) → ``classifier``.
 
     Args:
         name: Family identifier present in MODEL_REGISTRY.
         random_seed: Random state passed to the estimator factory.
+        missing_threshold: Passed to SecomPreprocessor — drop columns with
+            missing fraction strictly above this.
+        variance_threshold: Passed to SecomPreprocessor — drop columns with
+            variance strictly below this.
+        correlation_threshold: Passed to SecomPreprocessor — drop the later of
+            each pair with absolute correlation strictly above this.
 
     Returns:
         Unfitted sklearn Pipeline.
@@ -191,11 +236,39 @@ def build_pipeline(name: str, random_seed: int) -> Pipeline:
         KeyError: If name is not a registered family.
     """
     spec = MODEL_REGISTRY[name]
-    steps: list[tuple[str, BaseEstimator]] = []
+    steps: list[tuple[str, BaseEstimator]] = [
+        (
+            "preprocess",
+            SecomPreprocessor(
+                missing_threshold=missing_threshold,
+                variance_threshold=variance_threshold,
+                correlation_threshold=correlation_threshold,
+            ),
+        ),
+    ]
     if spec.needs_scaling:
         steps.append(("scaler", StandardScaler()))
     steps.append(("classifier", spec.build(random_seed)))
     return Pipeline(steps)
+
+
+def model_feature_names(pipeline: Pipeline) -> list[str]:
+    """Return feature names output by the pipeline's preprocess step.
+
+    Args:
+        pipeline: Fitted sklearn Pipeline containing a ``"preprocess"`` step
+            (SecomPreprocessor).
+
+    Returns:
+        List of kept column name strings from the fitted preprocessor.
+
+    Raises:
+        sklearn.exceptions.NotFittedError: If the preprocess step has not been
+            fitted yet.
+        KeyError: If the pipeline has no ``"preprocess"`` step.
+    """
+    preprocessor: SecomPreprocessor = pipeline.named_steps["preprocess"]
+    return list(preprocessor.get_feature_names_out())
 
 
 @dataclass
@@ -259,31 +332,51 @@ def run_search(
     model_cfg: dict[str, Any],
     cv_folds: int,
     random_seed: int,
+    missing_threshold: float,
+    variance_threshold: float,
+    correlation_threshold: float,
     n_jobs: int = -1,
 ) -> SearchResult:
-    """Tune one model family with cross-validated PR-AUC and refit the winner.
+    """Tune one model family with forward-chaining CV PR-AUC and refit the winner.
 
-    Tunable families are searched with RandomizedSearchCV; ``n_iter`` is capped
-    at the size of the discrete grid so small grids do not raise. The dummy
-    family has no grid: it is fit directly and scored with cross_val_score so it
-    still appears as the chance floor. For XGBoost, ``scale_pos_weight`` is set
-    from the training class ratio before searching.
+    Uses ``TimeSeriesSplit`` for both hyperparameter search and the dummy
+    baseline. Callers must pass ``X``/``y`` in time order. Raises if any
+    validation fold contains zero positive examples.
+
+    Tunable families are searched with ``RandomizedSearchCV``; ``n_iter`` is
+    capped at the size of the discrete grid so small grids do not raise. The
+    dummy family has no grid: it is fit directly and scored with
+    ``cross_val_score`` so it still appears as the chance floor. For XGBoost,
+    ``scale_pos_weight`` is set from the training class ratio before searching.
 
     Args:
         name: Registered family identifier.
-        X: Training feature matrix.
-        y: Training labels (0/1).
+        X: Training feature matrix in time order.
+        y: Training labels (0/1) in time order.
         model_cfg: Parsed model_config.yaml (keys ``models`` and ``search``).
-        cv_folds: Number of stratified folds.
-        random_seed: Random state for CV and the estimator.
+        cv_folds: Number of forward-chaining folds.
+        random_seed: Random state for the estimator and RandomizedSearchCV.
+        missing_threshold: Passed through to build_pipeline / SecomPreprocessor.
+        variance_threshold: Passed through to build_pipeline / SecomPreprocessor.
+        correlation_threshold: Passed through to build_pipeline / SecomPreprocessor.
         n_jobs: Parallel jobs for the search (bound to the CPU allocation).
 
     Returns:
         SearchResult with the refit best estimator and its CV PR-AUC.
+
+    Raises:
+        ValueError: If any validation fold contains zero positive examples.
     """
     spec = MODEL_REGISTRY[name]
-    pipeline = build_pipeline(name, random_seed)
-    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_seed)
+    pipeline = build_pipeline(
+        name,
+        random_seed,
+        missing_threshold=missing_threshold,
+        variance_threshold=variance_threshold,
+        correlation_threshold=correlation_threshold,
+    )
+    cv = TimeSeriesSplit(n_splits=cv_folds)
+    _check_positive_per_fold(y, cv)
 
     if name == "xgboost":
         n_pos = int((y == 1).sum())
