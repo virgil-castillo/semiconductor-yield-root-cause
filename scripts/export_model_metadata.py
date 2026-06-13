@@ -17,6 +17,7 @@ import joblib
 import pandas as pd
 
 from yield_risk.config import load_config, load_cost_config
+from yield_risk.evaluate import compute_metrics
 from yield_risk.model import model_feature_names
 from yield_risk.thresholding import find_optimal_threshold
 
@@ -25,7 +26,6 @@ def export_model_metadata(
     model_path: Path,
     test_path: Path,
     cv_results_path: Path,
-    metrics_path: Path,
     cost_config_path: Path,
     output_path: Path,
 ) -> dict[str, Any]:
@@ -34,6 +34,14 @@ def export_model_metadata(
     Loads the selected pipeline and held-out test set, computes the
     cost-optimal threshold, and writes a JSON artifact that
     ``yield_risk.scoring.load_model_bundle`` reads at serving time.
+
+    The ``metrics`` block is computed here directly from the loaded pipeline,
+    test data, and cost configuration at the cost-optimal threshold. It does not
+    depend on any file written as a side effect by another script, so the
+    served artifact is always internally consistent: ``metrics``,
+    ``optimal_threshold``, ``model_version``, ``expected_sensors``, and
+    ``selected_features`` all describe the *same* model and test set from this
+    invocation.
 
     The artifact includes two feature-related fields:
 
@@ -48,7 +56,6 @@ def export_model_metadata(
         model_path: Path to the joblib-serialised selected pipeline.
         test_path: Path to the held-out test CSV (sensor cols + label).
         cv_results_path: Path to cv_results.json produced by train_models.py.
-        metrics_path: Path to selected_model_metrics.json.
         cost_config_path: Path to cost_config.yaml.
         output_path: Destination path for model_metadata.json.
 
@@ -88,8 +95,13 @@ def export_model_metadata(
     short_hash = hashlib.sha256(model_path.read_bytes()).hexdigest()[:7]
     model_version = f"{family}-{short_hash}"
 
-    # Metrics snapshot
-    metrics: dict[str, Any] = json.loads(metrics_path.read_text())
+    # Metrics computed directly at the cost-optimal threshold from the loaded
+    # pipeline + test data — never read from a side-effect file. This keeps the
+    # metrics block consistent with optimal_threshold and the served model.
+    metrics: dict[str, Any] = dataclasses.asdict(
+        compute_metrics(y_test, y_prob, threshold=optimal_threshold)
+    )
+    metrics["threshold"] = optimal_threshold
 
     # Assemble metadata dict
     metadata: dict[str, Any] = {
@@ -120,7 +132,6 @@ def main() -> None:
     model_path = cfg.paths.models_dir / "selected_model.joblib"
     test_path = cfg.paths.processed_dir / "test.csv"
     cv_results_path = cfg.paths.reports_dir / "cv_results.json"
-    metrics_path = cfg.paths.reports_dir / "selected_model_metrics.json"
     cost_config_path = Path("configs/cost_config.yaml")
     output_path = cfg.paths.models_dir / "model_metadata.json"
 
@@ -128,7 +139,6 @@ def main() -> None:
         model_path=model_path,
         test_path=test_path,
         cv_results_path=cv_results_path,
-        metrics_path=metrics_path,
         cost_config_path=cost_config_path,
         output_path=output_path,
     )

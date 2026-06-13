@@ -4,6 +4,7 @@ All fixtures are self-contained in tmp_path — no real artifacts required.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from datetime import datetime
@@ -21,6 +22,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from yield_risk.config import load_cost_config
+from yield_risk.evaluate import compute_metrics
 from yield_risk.model import model_feature_names
 from yield_risk.preprocess import SecomPreprocessor
 from yield_risk.thresholding import find_optimal_threshold
@@ -104,22 +106,6 @@ def cv_results_path(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
-def metrics_path(tmp_path: Path) -> Path:
-    """Write a selected_model_metrics.json; return path."""
-    metrics: dict[str, Any] = {
-        "roc_auc": 0.91,
-        "pr_auc": 0.85,
-        "precision": 0.80,
-        "recall": 0.75,
-        "f1": 0.77,
-        "confusion_matrix": [[10, 2], [3, 15]],
-    }
-    path = tmp_path / "selected_model_metrics.json"
-    path.write_text(json.dumps(metrics))
-    return path
-
-
-@pytest.fixture()
 def cost_config_path(tmp_path: Path) -> Path:
     """Write a minimal cost_config.yaml; return path."""
     config = {
@@ -151,7 +137,6 @@ def metadata(
     model_path: Path,
     test_csv_path: Path,
     cv_results_path: Path,
-    metrics_path: Path,
     cost_config_path: Path,
     output_path: Path,
 ) -> dict[str, Any]:
@@ -160,7 +145,6 @@ def metadata(
         model_path=model_path,
         test_path=test_csv_path,
         cv_results_path=cv_results_path,
-        metrics_path=metrics_path,
         cost_config_path=cost_config_path,
         output_path=output_path,
     )
@@ -219,7 +203,6 @@ def test_optimal_threshold_is_float(metadata: dict[str, Any]) -> None:
 def test_optimal_threshold_reflects_cost_asymmetry(
     model_path: Path,
     cv_results_path: Path,
-    metrics_path: Path,
     tmp_path: Path,
 ) -> None:
     """optimal_threshold is driven below 0.5 by high false_pass cost.
@@ -270,7 +253,6 @@ def test_optimal_threshold_reflects_cost_asymmetry(
         model_path=model_path,
         test_path=asym_test_csv,
         cv_results_path=cv_results_path,
-        metrics_path=metrics_path,
         cost_config_path=cost_config_path,
         output_path=output_path,
     )
@@ -299,7 +281,6 @@ def test_optimal_threshold_reflects_cost_asymmetry(
 def test_no_selected_model_raises_value_error(
     model_path: Path,
     test_csv_path: Path,
-    metrics_path: Path,
     cost_config_path: Path,
     output_path: Path,
     tmp_path: Path,
@@ -317,7 +298,6 @@ def test_no_selected_model_raises_value_error(
             model_path=model_path,
             test_path=test_csv_path,
             cv_results_path=bad_cv_path,
-            metrics_path=metrics_path,
             cost_config_path=cost_config_path,
             output_path=output_path,
         )
@@ -356,12 +336,36 @@ def test_created_at_is_iso8601_utc(metadata: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_metrics_equals_metrics_file(
-    metadata: dict[str, Any], metrics_path: Path
+def test_metrics_computed_directly_from_model_and_test_data(
+    metadata: dict[str, Any], model_path: Path, test_csv_path: Path
 ) -> None:
-    """metrics in output equals the parsed contents of selected_model_metrics.json."""
-    expected = json.loads(metrics_path.read_text())
+    """metrics are recomputed from the pipeline + test data at the opt threshold.
+
+    This guards against the stale-file bug: metrics must reflect THIS model and
+    test set, not a side-effect file from another script. We independently
+    recompute the same metrics at the exported threshold and require a match.
+    """
+    pipeline = joblib.load(model_path)
+    df = pd.read_csv(test_csv_path)
+    sensor_cols = [c for c in df.columns if c.startswith("sensor_")]
+    y_true = df["label"].to_numpy()
+    y_prob = pipeline.predict_proba(df[sensor_cols])[:, 1]
+    expected = dataclasses.asdict(
+        compute_metrics(y_true, y_prob, threshold=metadata["optimal_threshold"])
+    )
+    expected["threshold"] = metadata["optimal_threshold"]
     assert metadata["metrics"] == expected
+
+
+def test_metrics_threshold_matches_optimal_threshold(
+    metadata: dict[str, Any],
+) -> None:
+    """The metrics block's threshold is the exported cost-optimal threshold.
+
+    Ensures internal consistency between the metrics snapshot and the served
+    operating point.
+    """
+    assert metadata["metrics"]["threshold"] == metadata["optimal_threshold"]
 
 
 # ---------------------------------------------------------------------------
