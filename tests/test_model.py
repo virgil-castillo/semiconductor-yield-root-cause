@@ -18,6 +18,7 @@ from yield_risk.model import (
     model_feature_names,
     run_search,
     select_best,
+    selection_score,
     train_model,
 )
 from yield_risk.preprocess import SecomPreprocessor
@@ -320,25 +321,66 @@ class TestModelFeatureNames:
         assert names == pipe.named_steps["preprocess"].get_feature_names_out()
 
 
+def _result(name: str, mean: float, std: float) -> SearchResult:
+    """Build a SearchResult with a throwaway pipeline for selection tests."""
+    return SearchResult(name, build_pipeline("dummy", 42, **_THRESH), mean, std, {})
+
+
 class TestSelectBest:
-    def test_returns_family_with_highest_mean(self) -> None:
+    def test_returns_family_with_highest_mean_when_stds_equal(self) -> None:
+        # All stds equal → ranking reduces to the mean.
         results = [
-            SearchResult("a", build_pipeline("dummy", 42, **_THRESH), 0.20, 0.0, {}),
-            SearchResult("b", build_pipeline("dummy", 42, **_THRESH), 0.55, 0.0, {}),
-            SearchResult("c", build_pipeline("dummy", 42, **_THRESH), 0.40, 0.0, {}),
+            _result("a", 0.20, 0.0),
+            _result("b", 0.55, 0.0),
+            _result("c", 0.40, 0.0),
         ]
         assert select_best(results) == "b"
 
     def test_ties_break_toward_first(self) -> None:
         results = [
-            SearchResult(
-                "first", build_pipeline("dummy", 42, **_THRESH), 0.50, 0.0, {}
-            ),
-            SearchResult(
-                "second", build_pipeline("dummy", 42, **_THRESH), 0.50, 0.0, {}
-            ),
+            _result("first", 0.50, 0.0),
+            _result("second", 0.50, 0.0),
         ]
         assert select_best(results) == "first"
+
+    def test_penalizes_high_variance_spike_over_stable_mean(self) -> None:
+        """A higher-mean but unstable family loses to a stable lower-mean one.
+
+        Mirrors the observed real run: random_forest/xgboost have the highest
+        means but enormous per-fold std (driven by one lucky fold), while
+        logistic_regression is stable and generalizes best on held-out data.
+        Under the mean - 1*std rule, logistic_regression wins.
+        """
+        results = [
+            _result("dummy", 0.057, 0.038),
+            _result("logistic_regression", 0.080, 0.033),
+            _result("random_forest", 0.219, 0.204),
+            _result("xgboost", 0.209, 0.201),
+        ]
+        assert select_best(results) == "logistic_regression"
+
+    def test_std_penalty_is_configurable(self) -> None:
+        """A zero penalty recovers the old highest-mean behavior."""
+        results = [
+            _result("stable", 0.080, 0.033),
+            _result("spiky", 0.219, 0.204),
+        ]
+        assert select_best(results, std_penalty=0.0) == "spiky"
+        assert select_best(results, std_penalty=1.0) == "stable"
+
+    def test_raises_on_empty_results(self) -> None:
+        with pytest.raises(ValueError, match="at least one"):
+            select_best([])
+
+
+class TestSelectionScore:
+    def test_is_mean_minus_std_by_default(self) -> None:
+        result = _result("x", 0.219, 0.204)
+        assert selection_score(result) == pytest.approx(0.015)
+
+    def test_zero_penalty_returns_mean(self) -> None:
+        result = _result("x", 0.219, 0.204)
+        assert selection_score(result, std_penalty=0.0) == pytest.approx(0.219)
 
 
 class TestComputeFoldDiagnostics:
