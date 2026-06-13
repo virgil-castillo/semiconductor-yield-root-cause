@@ -10,7 +10,7 @@ from yield_risk.config import RunConfig
 from yield_risk.preprocess import (
     SecomPreprocessor,
     run_preprocessing,
-    split_by_time,
+    split_stratified,
 )
 
 # ---------------------------------------------------------------------------
@@ -320,72 +320,93 @@ class TestSecomPreprocessorGetFeatureNamesOut:
 
 
 # ---------------------------------------------------------------------------
-# split_by_time
+# split_stratified
 # ---------------------------------------------------------------------------
 
 
-class TestSplitByTime:
+def _stratified_df(n: int = 200, pos_rate: float = 0.13) -> pd.DataFrame:
+    """Build a synthetic SECOM-schema DataFrame for stratification tests.
+
+    Args:
+        n: Total number of rows.
+        pos_rate: Fraction of rows with label == 1.
+
+    Returns:
+        DataFrame with sensor_000, label, and timestamp columns.
+    """
+    rng = np.random.default_rng(99)
+    n_pos = round(n * pos_rate)
+    labels = [1] * n_pos + [0] * (n - n_pos)
+    return pd.DataFrame(
+        {
+            "sensor_000": rng.normal(0, 1, n).tolist(),
+            "label": labels,
+            "timestamp": pd.date_range("2024-01-01", periods=n, freq="h").tolist(),
+        }
+    )
+
+
+class TestSplitStratified:
+    """Tests for split_stratified."""
+
     @pytest.fixture()
-    def time_df(self) -> pd.DataFrame:
-        """10 rows with ascending timestamps and both classes in each split.
+    def strat_df(self) -> pd.DataFrame:
+        """200-row DataFrame with ~13 % positive rate."""
+        return _stratified_df(n=200, pos_rate=0.13)
 
-        Labels are interleaved so a 20 % tail (2 rows) still has class 1
-        (rows 8-9 = labels [0,1]) and the train (rows 0-7) also has class 1.
-        """
-        return pd.DataFrame(
-            {
-                "sensor_000": np.arange(10, dtype=float),
-                "label": [0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
-                "timestamp": pd.date_range("2024-01-01", periods=10, freq="D"),
-            }
-        )
-
-    def test_test_is_contiguous_tail_by_time(self, time_df: pd.DataFrame) -> None:
-        train, test = split_by_time(time_df, test_size=0.2)
-        assert len(test) == 2
-        assert len(train) == 8
-
-    def test_train_timestamps_le_test_timestamps(
-        self, time_df: pd.DataFrame
+    def test_both_splits_contain_both_classes(
+        self, strat_df: pd.DataFrame
     ) -> None:
-        train, test = split_by_time(time_df, test_size=0.2)
-        assert train["timestamp"].max() <= test["timestamp"].min()
+        """Each split must have at least one positive and one negative."""
+        train, test = split_stratified(strat_df, test_size=0.15, random_seed=0)
+        assert set(train["label"].unique()) == {0, 1}
+        assert set(test["label"].unique()) == {0, 1}
 
-    def test_splits_are_disjoint(self, time_df: pd.DataFrame) -> None:
-        train, test = split_by_time(time_df, test_size=0.2)
+    def test_test_split_size_is_approximately_correct(
+        self, strat_df: pd.DataFrame
+    ) -> None:
+        """With 200 rows and test_size=0.15, test should be 30 rows."""
+        _, test = split_stratified(strat_df, test_size=0.15, random_seed=0)
+        assert len(test) == 30
+
+    def test_stratification_balance_train(self, strat_df: pd.DataFrame) -> None:
+        """Train positive prevalence within ±0.03 of overall prevalence."""
+        overall = strat_df["label"].mean()
+        train, _ = split_stratified(strat_df, test_size=0.15, random_seed=0)
+        assert abs(train["label"].mean() - overall) <= 0.03
+
+    def test_stratification_balance_test(self, strat_df: pd.DataFrame) -> None:
+        """Test positive prevalence within ±0.03 of overall prevalence."""
+        overall = strat_df["label"].mean()
+        _, test = split_stratified(strat_df, test_size=0.15, random_seed=0)
+        assert abs(test["label"].mean() - overall) <= 0.03
+
+    def test_all_rows_present(self, strat_df: pd.DataFrame) -> None:
+        """Train + test must account for every row."""
+        train, test = split_stratified(strat_df, test_size=0.15, random_seed=0)
+        assert len(train) + len(test) == len(strat_df)
+
+    def test_splits_are_disjoint(self, strat_df: pd.DataFrame) -> None:
+        """Train and test index sets must not overlap."""
+        train, test = split_stratified(strat_df, test_size=0.15, random_seed=0)
         assert set(train.index).isdisjoint(set(test.index))
 
-    def test_all_rows_present(self, time_df: pd.DataFrame) -> None:
-        train, test = split_by_time(time_df, test_size=0.2)
-        assert len(train) + len(test) == len(time_df)
+    def test_same_seed_yields_identical_splits(
+        self, strat_df: pd.DataFrame
+    ) -> None:
+        """Calling twice with the same seed must return the same partition."""
+        train_a, test_a = split_stratified(strat_df, test_size=0.15, random_seed=7)
+        train_b, test_b = split_stratified(strat_df, test_size=0.15, random_seed=7)
+        assert list(train_a.index) == list(train_b.index)
+        assert list(test_a.index) == list(test_b.index)
 
-    def test_identical_timestamps_split_by_position(self) -> None:
-        """Ties fall on whichever side the position-based cut lands."""
-        df = pd.DataFrame(
-            {
-                "sensor_000": np.arange(10, dtype=float),
-                # interleaved labels so both splits have both classes
-                "label": [0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
-                # same timestamp for all rows
-                "timestamp": ["2024-01-01"] * 10,
-            }
-        )
-        train, test = split_by_time(df, test_size=0.3)
-        assert len(train) + len(test) == 10
-
-    def test_single_class_in_split_raises(self) -> None:
-        """If either split has only one class, raise ValueError."""
-        df = pd.DataFrame(
-            {
-                "sensor_000": np.arange(10, dtype=float),
-                # all positives are at the end → with tiny test they vanish from train
-                "label": [0] * 8 + [1] * 2,
-                "timestamp": pd.date_range("2024-01-01", periods=10, freq="D"),
-            }
-        )
-        # test_size=0.90 puts all 1-labels in train and 0-labels only in test
-        with pytest.raises(ValueError, match="single.class"):
-            split_by_time(df, test_size=0.90)
+    def test_all_columns_preserved_in_splits(
+        self, strat_df: pd.DataFrame
+    ) -> None:
+        """All columns of the input DataFrame are present in both splits."""
+        train, test = split_stratified(strat_df, test_size=0.15, random_seed=0)
+        assert list(train.columns) == list(strat_df.columns)
+        assert list(test.columns) == list(strat_df.columns)
 
 
 # ---------------------------------------------------------------------------
@@ -465,12 +486,6 @@ class TestRunPreprocessing:
         for col in original_sensors:
             assert col in train.columns
             assert col in test.columns
-
-    def test_train_timestamps_le_test_timestamps(
-        self, sample_df: pd.DataFrame, run_cfg: RunConfig
-    ) -> None:
-        train, test = run_preprocessing(sample_df, run_cfg)
-        assert train["timestamp"].max() <= test["timestamp"].min()
 
     def test_splits_are_disjoint(
         self, sample_df: pd.DataFrame, run_cfg: RunConfig

@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.model_selection import train_test_split
 from sklearn.utils.validation import check_is_fitted
 
 from yield_risk.config import RunConfig
@@ -199,32 +200,37 @@ class SecomPreprocessor(BaseEstimator, TransformerMixin):  # type: ignore[misc]
         return list(self.kept_columns_)
 
 
-def split_by_time(
+def split_stratified(
     df: pd.DataFrame,
     test_size: float,
+    random_seed: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Stable-sort by timestamp and take the last test_size fraction as test.
+    """Stratified random holdout split preserving positive-class prevalence.
 
-    The split is position-based after the stable sort.  Identical timestamps
-    at the boundary fall on whichever side the position cut lands.
+    Uses ``sklearn.model_selection.train_test_split`` with
+    ``stratify=df["label"]`` so that both splits mirror the overall
+    positive-class rate.  NaN values in sensor columns are preserved.
 
     Args:
-        df: DataFrame containing ``timestamp`` and ``label`` columns.
-        test_size: Fraction of rows (contiguous tail after sort) held out as test.
+        df: DataFrame containing a ``label`` column with binary class values.
+        test_size: Fraction of rows to place in the test split (e.g. 0.15).
+        random_seed: Seed for the random-number generator to ensure
+            reproducibility.
 
     Returns:
         Tuple of ``(train_df, test_df)`` with NaNs intact and all columns.
+        Index values are the original row positions from *df*.
 
     Raises:
-        ValueError: If either split contains only one distinct class in ``label``.
+        ValueError: If either split contains only one distinct class in
+            ``label`` (single-class split).
     """
-    sorted_df = df.sort_values("timestamp", kind="stable").reset_index(drop=True)
-    n = len(sorted_df)
-    n_test = max(1, round(n * test_size))
-    n_train = n - n_test
-
-    train = sorted_df.iloc[:n_train]
-    test = sorted_df.iloc[n_train:]
+    train, test = train_test_split(
+        df,
+        test_size=test_size,
+        stratify=df["label"],
+        random_state=random_seed,
+    )
 
     for name, split in (("train", train), ("test", test)):
         n_classes = split["label"].nunique()
@@ -242,18 +248,20 @@ def run_preprocessing(
     df: pd.DataFrame,
     run_cfg: RunConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Stable-sort by timestamp and split into raw train/test halves.
+    """Stratified-split the raw DataFrame into train and test halves.
 
     Returns raw splits with NaNs intact and all sensor columns retained.
-    No imputation or feature selection is performed here; apply
-    ``SecomPreprocessor`` to the training split to learn those transforms.
+    No timestamp sorting, imputation, or feature selection is performed here;
+    apply ``SecomPreprocessor`` to the training split to learn those transforms.
 
     Args:
         df: Raw SECOM DataFrame (output of load_secom, already validated).
-        run_cfg: RunConfig with split parameters (test_size used).
+        run_cfg: RunConfig with split parameters (test_size and random_seed
+            used).
 
     Returns:
         Tuple of (train_df, test_df).  Both contain all sensor columns, label,
-        and timestamp.  NaN values in sensor columns are preserved.
+        and timestamp.  NaN values in sensor columns are preserved.  Both
+        splits reflect the overall positive-class prevalence (stratified).
     """
-    return split_by_time(df, run_cfg.test_size)
+    return split_stratified(df, run_cfg.test_size, run_cfg.random_seed)
