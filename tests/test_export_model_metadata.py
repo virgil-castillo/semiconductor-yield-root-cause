@@ -21,6 +21,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from yield_risk.config import load_cost_config
+from yield_risk.model import model_feature_names
+from yield_risk.preprocess import SecomPreprocessor
 from yield_risk.thresholding import find_optimal_threshold
 
 # ---------------------------------------------------------------------------
@@ -37,12 +39,25 @@ FAMILY = "random_forest"
 
 
 def _make_pipeline() -> Pipeline:
-    """Return a tiny fitted Pipeline over SENSOR_COLS."""
+    """Return a tiny fitted Pipeline over SENSOR_COLS.
+
+    Includes a SecomPreprocessor as the first step so that
+    model_feature_names() can be called on the resulting pipeline.
+    Thresholds are chosen to keep all three sensor columns.
+    """
     rng = np.random.default_rng(0)
     X = pd.DataFrame(rng.random((40, len(SENSOR_COLS))), columns=SENSOR_COLS)
     y = pd.Series((X["sensor_001"] > 0.5).astype(int))
     pipe = Pipeline(
         [
+            (
+                "preprocess",
+                SecomPreprocessor(
+                    missing_threshold=0.9,
+                    variance_threshold=0.0,
+                    correlation_threshold=0.999,
+                ),
+            ),
             ("scaler", StandardScaler()),
             ("clf", DummyClassifier(strategy="stratified", random_state=0)),
         ]
@@ -361,3 +376,25 @@ def test_expected_sensors_equals_sensor_columns(
     df = pd.read_csv(test_csv_path)
     sensor_cols = [c for c in df.columns if c.startswith("sensor_")]
     assert metadata["expected_sensors"] == sensor_cols
+
+
+# ---------------------------------------------------------------------------
+# Tests — selected_features
+# ---------------------------------------------------------------------------
+
+
+def test_selected_features_equals_model_feature_names(
+    metadata: dict[str, Any], model_path: Path
+) -> None:
+    """selected_features equals model_feature_names of the loaded pipeline."""
+    pipeline = joblib.load(model_path)
+    assert metadata["selected_features"] == model_feature_names(pipeline)
+
+
+def test_selected_features_is_subset_of_expected_sensors(
+    metadata: dict[str, Any],
+) -> None:
+    """Every entry in selected_features is present in expected_sensors."""
+    expected_set = set(metadata["expected_sensors"])
+    for feature in metadata["selected_features"]:
+        assert feature in expected_set

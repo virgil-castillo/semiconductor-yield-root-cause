@@ -17,6 +17,7 @@ import joblib
 import pandas as pd
 
 from yield_risk.config import load_config, load_cost_config
+from yield_risk.model import model_feature_names
 from yield_risk.thresholding import find_optimal_threshold
 
 
@@ -33,6 +34,15 @@ def export_model_metadata(
     Loads the selected pipeline and held-out test set, computes the
     cost-optimal threshold, and writes a JSON artifact that
     ``yield_risk.scoring.load_model_bundle`` reads at serving time.
+
+    The artifact includes two feature-related fields:
+
+    * ``expected_sensors`` — the full raw ``sensor_`` column set read from the
+      test CSV.  The serving path aligns raw input to these columns before
+      calling ``pipeline.predict_proba``.
+    * ``selected_features`` — the post-selection feature names returned by
+      ``model_feature_names(pipeline)``, i.e. the columns the classifier
+      actually uses after the pipeline's ``preprocess`` step.
 
     Args:
         model_path: Path to the joblib-serialised selected pipeline.
@@ -89,6 +99,7 @@ def export_model_metadata(
         "created_at": datetime.now(UTC).isoformat(),
         "metrics": metrics,
         "expected_sensors": sensor_cols,
+        "selected_features": model_feature_names(pipeline),
     }
 
     # Write JSON, creating parent dirs if needed
