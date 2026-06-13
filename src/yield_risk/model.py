@@ -8,10 +8,11 @@ from typing import Any, cast
 
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator
+from sklearn.base import BaseEstimator, clone
 from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.model_selection import (
     RandomizedSearchCV,
     TimeSeriesSplit,
@@ -133,6 +134,68 @@ def cross_validate_model(
         pipeline, X, y, cv=cv, scoring=["roc_auc", "f1"]
     )
     return cast(dict[str, np.ndarray], results)
+
+
+def compute_fold_diagnostics(
+    estimator: Pipeline,
+    X: pd.DataFrame,
+    y: pd.Series,
+    cv_folds: int,
+) -> list[dict[str, float | int]]:
+    """Compute per-fold validation diagnostics using forward-chaining CV.
+
+    Clones the estimator for each fold, fits on the training indices, and
+    evaluates on the validation indices. Raises before any fitting if any
+    validation fold contains zero positive examples.
+
+    Args:
+        estimator: Unfitted (or previously fitted) sklearn Pipeline. It is
+            cloned internally; the original is not mutated.
+        X: Feature matrix in time order.
+        y: Labels (0/1) in time order.
+        cv_folds: Number of forward-chaining folds for ``TimeSeriesSplit``.
+
+    Returns:
+        List of length ``cv_folds``. Each dict has keys:
+
+        - ``fold`` (int): Zero-based fold index.
+        - ``val_prevalence`` (float): Fraction of positive labels in the
+          validation split.
+        - ``roc_auc`` (float): ROC-AUC on the validation split.
+        - ``pr_auc`` (float): PR-AUC (average precision) on the validation
+          split.
+
+    Raises:
+        ValueError: If any validation fold contains zero positive examples
+            (PR-AUC is undefined in that case).
+    """
+    cv = TimeSeriesSplit(n_splits=cv_folds)
+    _check_positive_per_fold(y, cv)
+
+    diagnostics: list[dict[str, float | int]] = []
+    y_arr = np.asarray(y)
+    X_vals = X.values
+
+    for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X_vals)):
+        X_train_fold = X.iloc[train_idx]
+        y_train_fold = y.iloc[train_idx]
+        X_val_fold = X.iloc[val_idx]
+        y_val_fold = y_arr[val_idx]
+
+        fold_estimator: Pipeline = clone(estimator)
+        fold_estimator.fit(X_train_fold, y_train_fold)
+        y_prob = fold_estimator.predict_proba(X_val_fold)[:, 1]
+
+        diagnostics.append(
+            {
+                "fold": fold_idx,
+                "val_prevalence": float(y_val_fold.mean()),
+                "roc_auc": float(roc_auc_score(y_val_fold, y_prob)),
+                "pr_auc": float(average_precision_score(y_val_fold, y_prob)),
+            }
+        )
+
+    return diagnostics
 
 
 @dataclass

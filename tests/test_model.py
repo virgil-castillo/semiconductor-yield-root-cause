@@ -13,6 +13,7 @@ from yield_risk.model import (
     SearchResult,
     build_baseline_pipeline,
     build_pipeline,
+    compute_fold_diagnostics,
     cross_validate_model,
     model_feature_names,
     run_search,
@@ -338,3 +339,84 @@ class TestSelectBest:
             ),
         ]
         assert select_best(results) == "first"
+
+
+class TestComputeFoldDiagnostics:
+    def test_returns_list_of_length_cv_folds(
+        self,
+        synthetic_data: tuple[pd.DataFrame, pd.Series],
+    ) -> None:
+        X, y = synthetic_data
+        pipeline = build_pipeline("random_forest", random_seed=42, **_THRESH)
+        diagnostics = compute_fold_diagnostics(pipeline, X, y, cv_folds=3)
+        assert len(diagnostics) == 3
+
+    def test_each_entry_has_required_keys(
+        self,
+        synthetic_data: tuple[pd.DataFrame, pd.Series],
+    ) -> None:
+        X, y = synthetic_data
+        pipeline = build_pipeline("random_forest", random_seed=42, **_THRESH)
+        diagnostics = compute_fold_diagnostics(pipeline, X, y, cv_folds=3)
+        for entry in diagnostics:
+            assert "fold" in entry
+            assert "val_prevalence" in entry
+            assert "roc_auc" in entry
+            assert "pr_auc" in entry
+
+    def test_fold_index_is_zero_based_sequential(
+        self,
+        synthetic_data: tuple[pd.DataFrame, pd.Series],
+    ) -> None:
+        X, y = synthetic_data
+        pipeline = build_pipeline("random_forest", random_seed=42, **_THRESH)
+        diagnostics = compute_fold_diagnostics(pipeline, X, y, cv_folds=3)
+        assert [entry["fold"] for entry in diagnostics] == [0, 1, 2]
+
+    def test_val_prevalence_matches_fold_labels(
+        self,
+        synthetic_data: tuple[pd.DataFrame, pd.Series],
+    ) -> None:
+        """val_prevalence must equal the mean of the validation labels for each fold."""
+        X, y = synthetic_data
+        pipeline = build_pipeline("random_forest", random_seed=42, **_THRESH)
+        cv = TimeSeriesSplit(n_splits=3)
+        diagnostics = compute_fold_diagnostics(pipeline, X, y, cv_folds=3)
+        for fold_idx, (_, val_idx) in enumerate(cv.split(X)):
+            expected_prevalence = float(y.iloc[val_idx].mean())
+            assert diagnostics[fold_idx]["val_prevalence"] == pytest.approx(
+                expected_prevalence
+            )
+
+    def test_roc_auc_in_unit_interval(
+        self,
+        synthetic_data: tuple[pd.DataFrame, pd.Series],
+    ) -> None:
+        X, y = synthetic_data
+        pipeline = build_pipeline("random_forest", random_seed=42, **_THRESH)
+        diagnostics = compute_fold_diagnostics(pipeline, X, y, cv_folds=3)
+        for entry in diagnostics:
+            assert 0.0 <= entry["roc_auc"] <= 1.0
+
+    def test_pr_auc_in_unit_interval(
+        self,
+        synthetic_data: tuple[pd.DataFrame, pd.Series],
+    ) -> None:
+        X, y = synthetic_data
+        pipeline = build_pipeline("random_forest", random_seed=42, **_THRESH)
+        diagnostics = compute_fold_diagnostics(pipeline, X, y, cv_folds=3)
+        for entry in diagnostics:
+            assert 0.0 <= entry["pr_auc"] <= 1.0
+
+    def test_zero_positive_fold_raises_value_error(self) -> None:
+        """compute_fold_diagnostics raises ValueError when a fold has no positives."""
+        rng = np.random.default_rng(0)
+        X = pd.DataFrame(
+            rng.normal(0, 1, (30, 5)), columns=[f"f{i}" for i in range(5)]
+        )
+        # All positives at the start — later folds will have zero positives.
+        labels = [1] * 10 + [0] * 20
+        y = pd.Series(labels)
+        pipeline = build_pipeline("random_forest", random_seed=42, **_THRESH)
+        with pytest.raises(ValueError, match="[Ff]old"):
+            compute_fold_diagnostics(pipeline, X, y, cv_folds=3)

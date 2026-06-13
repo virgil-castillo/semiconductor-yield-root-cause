@@ -12,7 +12,13 @@ import joblib
 import pandas as pd
 
 from yield_risk.config import load_config, load_model_config
-from yield_risk.model import MODEL_REGISTRY, run_search, select_best
+from yield_risk.model import (
+    MODEL_REGISTRY,
+    SearchResult,
+    compute_fold_diagnostics,
+    run_search,
+    select_best,
+)
 
 
 def main() -> None:
@@ -28,7 +34,9 @@ def main() -> None:
     cfg.paths.models_dir.mkdir(parents=True, exist_ok=True)
     cfg.paths.reports_dir.mkdir(parents=True, exist_ok=True)
 
-    results = []
+    search_results: list[SearchResult] = []
+    fold_diagnostics_map: dict[str, list[dict[str, float | int]]] = {}
+
     for name in MODEL_REGISTRY:
         print(f"=== {name} ===")
         result = run_search(
@@ -46,12 +54,21 @@ def main() -> None:
             f"  CV PR-AUC: {result.cv_pr_auc_mean:.3f} "
             f"+/- {result.cv_pr_auc_std:.3f}"
         )
+        folds = compute_fold_diagnostics(
+            result.estimator, X_train, y_train, cfg.run.cv_folds
+        )
+        for fd in folds:
+            print(
+                f"  fold {fd['fold']}: prevalence={fd['val_prevalence']:.3f}"
+                f"  roc_auc={fd['roc_auc']:.3f}"
+            )
+        fold_diagnostics_map[name] = folds
         joblib.dump(result.estimator, cfg.paths.models_dir / f"{name}.joblib")
-        results.append(result)
+        search_results.append(result)
 
-    winner = select_best(results)
+    winner = select_best(search_results)
     print(f"Winner: {winner}")
-    winning = next(r for r in results if r.name == winner)
+    winning = next(r for r in search_results if r.name == winner)
     joblib.dump(winning.estimator, cfg.paths.models_dir / "selected_model.joblib")
 
     cv_results = [
@@ -61,8 +78,9 @@ def main() -> None:
             "cv_pr_auc_std": r.cv_pr_auc_std,
             "best_params": r.best_params,
             "selected": r.name == winner,
+            "folds": fold_diagnostics_map[r.name],
         }
-        for r in results
+        for r in search_results
     ]
     cv_path = cfg.paths.reports_dir / "cv_results.json"
     cv_path.write_text(json.dumps(cv_results, indent=2))
