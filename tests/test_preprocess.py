@@ -422,7 +422,6 @@ class TestRunPreprocessing:
         return RunConfig(
             random_seed=42,
             test_size=0.20,
-            val_size=0.10,
             cv_folds=5,
             missing_threshold=0.60,
             variance_threshold=0.01,

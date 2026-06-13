@@ -37,7 +37,6 @@ class RunConfig:
     Attributes:
         random_seed: Global RNG seed for reproducibility.
         test_size: Fraction of data held out for final evaluation.
-        val_size: Fraction of training data used for validation.
         cv_folds: Number of stratified CV folds.
         missing_threshold: Drop features with missing rate above this value.
         variance_threshold: Drop features with variance below this value.
@@ -46,7 +45,6 @@ class RunConfig:
 
     random_seed: int
     test_size: float
-    val_size: float
     cv_folds: int
     missing_threshold: float
     variance_threshold: float

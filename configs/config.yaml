@@ -8,8 +8,7 @@ paths:
 
 run:
   random_seed: 42
-  test_size: 0.20
-  val_size: 0.10
+  test_size: 0.15
   cv_folds: 5
   missing_threshold: 0.60    # drop features with > 60% missing values
   variance_threshold: 0.01   # drop near-constant features below this variance
