@@ -5,9 +5,10 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.preprocessing import StandardScaler
 
+from yield_risk.config import CostMatrix, ThresholdSearchConfig
 from yield_risk.model import (
     MODEL_REGISTRY,
     SearchResult,
@@ -15,6 +16,7 @@ from yield_risk.model import (
     build_pipeline,
     compute_fold_diagnostics,
     cross_validate_model,
+    frozen_operating_threshold,
     model_feature_names,
     run_search,
     select_best,
@@ -22,6 +24,7 @@ from yield_risk.model import (
     train_model,
 )
 from yield_risk.preprocess import SecomPreprocessor
+from yield_risk.thresholding import find_optimal_threshold
 
 # Small thresholds that preserve all 5 synthetic columns:
 #  missing=0.6 → none dropped (no NaNs at all)
@@ -654,3 +657,81 @@ class TestPerFoldRefit:
             "across stratified training subsets, but all were the same. "
             f"Fold medians: {fold_medians}"
         )
+
+
+# ---------------------------------------------------------------------------
+# frozen_operating_threshold
+# ---------------------------------------------------------------------------
+
+_COST_MATRIX = CostMatrix(
+    true_pass=0.0,
+    true_fail=0.0,
+    false_fail=1.0,
+    false_pass=10.0,
+)
+_THRESHOLD_SEARCH = ThresholdSearchConfig(low=0.1, high=0.9, steps=9)
+
+
+class TestFrozenOperatingThreshold:
+    """Tests for frozen_operating_threshold helper."""
+
+    def test_returns_float_in_search_range(
+        self,
+        synthetic_data: tuple[pd.DataFrame, pd.Series],
+    ) -> None:
+        """Result is a float within [search.low, search.high]."""
+        X, y = synthetic_data
+        pipeline = build_pipeline("random_forest", random_seed=42, **_THRESH)
+        result = frozen_operating_threshold(
+            pipeline, X, y,
+            cv_folds=3,
+            random_seed=42,
+            cost_matrix=_COST_MATRIX,
+            threshold_search=_THRESHOLD_SEARCH,
+        )
+        assert isinstance(result, float)
+        assert _THRESHOLD_SEARCH.low <= result <= _THRESHOLD_SEARCH.high
+
+    def test_determinism_same_seed_same_value(
+        self,
+        synthetic_data: tuple[pd.DataFrame, pd.Series],
+    ) -> None:
+        """Same seed produces identical threshold."""
+        X, y = synthetic_data
+        pipeline = build_pipeline("random_forest", random_seed=42, **_THRESH)
+        t1 = frozen_operating_threshold(
+            pipeline, X, y, cv_folds=3, random_seed=42,
+            cost_matrix=_COST_MATRIX, threshold_search=_THRESHOLD_SEARCH,
+        )
+        t2 = frozen_operating_threshold(
+            pipeline, X, y, cv_folds=3, random_seed=42,
+            cost_matrix=_COST_MATRIX, threshold_search=_THRESHOLD_SEARCH,
+        )
+        assert t1 == t2
+
+    def test_equals_independent_oof_find_optimal_threshold(
+        self,
+        synthetic_data: tuple[pd.DataFrame, pd.Series],
+    ) -> None:
+        """Result equals independently computed OOF find_optimal_threshold.
+
+        Verifies the helper truly uses out-of-fold train predictions and is
+        therefore leak-free: the threshold is derived entirely from (X, y)
+        without any held-out test set.
+        """
+        X, y = synthetic_data
+        pipeline = build_pipeline("random_forest", random_seed=42, **_THRESH)
+        result = frozen_operating_threshold(
+            pipeline, X, y, cv_folds=3, random_seed=42,
+            cost_matrix=_COST_MATRIX, threshold_search=_THRESHOLD_SEARCH,
+        )
+        # Reproduce OOF manually
+        cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+        oof = cross_val_predict(
+            build_pipeline("random_forest", random_seed=42, **_THRESH),
+            X, y, cv=cv, method="predict_proba",
+        )
+        expected = find_optimal_threshold(
+            np.asarray(y), oof[:, 1], _COST_MATRIX, _THRESHOLD_SEARCH
+        ).threshold
+        assert result == pytest.approx(expected)

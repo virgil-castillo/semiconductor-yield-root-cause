@@ -10,6 +10,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock, patch
 
 import joblib
 import numpy as np
@@ -21,11 +22,9 @@ from sklearn.dummy import DummyClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from yield_risk.config import load_cost_config
 from yield_risk.evaluate import compute_metrics
 from yield_risk.model import model_feature_names
 from yield_risk.preprocess import SecomPreprocessor
-from yield_risk.thresholding import find_optimal_threshold
 
 # ---------------------------------------------------------------------------
 # Shared constants
@@ -95,10 +94,24 @@ def test_csv_path(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def cv_results_path(tmp_path: Path) -> Path:
-    """Write a cv_results.json with one selected entry; return path."""
+    """Write a cv_results.json with one selected entry; return path.
+
+    Each entry includes a frozen ``threshold`` field produced by train_models.py
+    after the second-leak fix.
+    """
     records = [
-        {"model": "logistic_regression", "cv_pr_auc_mean": 0.72, "selected": False},
-        {"model": FAMILY, "cv_pr_auc_mean": 0.85, "selected": True},
+        {
+            "model": "logistic_regression",
+            "cv_pr_auc_mean": 0.72,
+            "selected": False,
+            "threshold": 0.4,
+        },
+        {
+            "model": FAMILY,
+            "cv_pr_auc_mean": 0.85,
+            "selected": True,
+            "threshold": 0.3,
+        },
     ]
     path = tmp_path / "cv_results.json"
     path.write_text(json.dumps(records))
@@ -200,77 +213,73 @@ def test_optimal_threshold_is_float(metadata: dict[str, Any]) -> None:
     assert isinstance(metadata["optimal_threshold"], float)
 
 
-def test_optimal_threshold_reflects_cost_asymmetry(
-    model_path: Path,
+def test_optimal_threshold_is_frozen_from_cv_results(
+    metadata: dict[str, Any],
     cv_results_path: Path,
+) -> None:
+    """optimal_threshold equals the selected entry's frozen threshold from cv_results.
+
+    After the second-leak fix, export_model_metadata reads the threshold from
+    the cv_results.json artifact (produced by train_models.py using OOF train
+    predictions) rather than computing it from test labels.
+    """
+    cv_data = json.loads(cv_results_path.read_text())
+    selected_entry = next(r for r in cv_data if r["selected"])
+    assert metadata["optimal_threshold"] == float(selected_entry["threshold"])
+
+
+def test_export_never_calls_find_optimal_threshold_on_test(
+    model_path: Path,
+    test_csv_path: Path,
+    cv_results_path: Path,
+    cost_config_path: Path,
+    output_path: Path,
+) -> None:
+    """export_model_metadata never calls find_optimal_threshold on test data.
+
+    Patches find_optimal_threshold at its definition site and asserts it is
+    never invoked during export_model_metadata execution.
+    """
+    spy = Mock()
+    with patch("yield_risk.thresholding.find_optimal_threshold", spy):
+        export_model_metadata(
+            model_path=model_path,
+            test_path=test_csv_path,
+            cv_results_path=cv_results_path,
+            cost_config_path=cost_config_path,
+            output_path=output_path,
+        )
+    spy.assert_not_called()
+
+
+def test_missing_threshold_key_raises_value_error(
+    model_path: Path,
+    test_csv_path: Path,
+    cost_config_path: Path,
+    output_path: Path,
     tmp_path: Path,
 ) -> None:
-    """optimal_threshold is driven below 0.5 by high false_pass cost.
+    """export_model_metadata raises ValueError when selected entry lacks 'threshold'.
 
-    Constructs a hermetic test CSV whose scores (from the fitted pipeline) are
-    irrelevant — what matters is that the cost config has false_pass=10x
-    false_fail.  We verify the exported threshold equals the independently
-    computed find_optimal_threshold result for the same inputs, and that it is
-    strictly less than 0.5, confirming cost-sensitive (not naive) selection.
-
-    The label distribution is all-fail (y=1 throughout), so every threshold
-    below 1.0 that catches all positives is equally good, but a *high* threshold
-    would miss many fails (costly false_passes).  The grid runs 0.05 to 0.95 in
-    fine steps; a correct implementation must land well below 0.5.
+    Simulates an artifact produced by an older train_models.py that did not
+    persist the frozen threshold.
     """
-    # Cost config: false_pass is 10x more expensive than false_fail
-    cost_config: dict[str, Any] = {
-        "cost_matrix": {
-            "true_pass": 0.0,
-            "true_fail": 0.0,
-            "false_fail": 1.0,
-            "false_pass": 10.0,
-        },
-        "threshold_search": {
-            "low": 0.05,
-            "high": 0.95,
-            "steps": 19,
-        },
-    }
-    cost_config_path = tmp_path / "cost_config_asym.yaml"
-    cost_config_path.write_text(yaml.dump(cost_config))
+    old_cv_results = [
+        {"model": "logistic_regression", "cv_pr_auc_mean": 0.72, "selected": False},
+        {"model": FAMILY, "cv_pr_auc_mean": 0.85, "selected": True},
+        # Note: no "threshold" key in the selected entry
+    ]
+    bad_cv_path = tmp_path / "cv_old_format.json"
+    bad_cv_path.write_text(json.dumps(old_cv_results))
 
-    # Build a test CSV: all labels are 1 (fail).
-    # The pipeline is a DummyClassifier(strategy="stratified") fit on a
-    # balanced dataset, so it returns scores near 0.5.  At threshold > ~0.5
-    # it starts predicting 0 (pass) for some samples — generating false_passes
-    # that are very costly.  At threshold <= the pipeline's score the optimal
-    # cost is achieved.
-    rng = np.random.default_rng(42)
-    n = 50
-    df = pd.DataFrame(rng.random((n, len(SENSOR_COLS))), columns=SENSOR_COLS)
-    df["label"] = 1  # all failures — any missed prediction is a false_pass
-    asym_test_csv = tmp_path / "test_asym.csv"
-    df.to_csv(asym_test_csv, index=False)
-
-    output_path = tmp_path / "meta_asym" / "model_metadata.json"
-    result = export_model_metadata(
-        model_path=model_path,
-        test_path=asym_test_csv,
-        cv_results_path=cv_results_path,
-        cost_config_path=cost_config_path,
-        output_path=output_path,
-    )
-
-    # Independently compute the expected threshold using the same pipeline
-    pipeline = joblib.load(model_path)
-    X = df[SENSOR_COLS]
-    y_true = df["label"].to_numpy()
-    y_prob = pipeline.predict_proba(X)[:, 1]
-    cost_cfg = load_cost_config(cost_config_path)
-    expected = find_optimal_threshold(
-        y_true, y_prob, cost_cfg.cost_matrix, cost_cfg.threshold_search
-    )
-
-    # The exported threshold must match the independently computed result
-    assert result["optimal_threshold"] == expected.threshold
-    # And must be strictly below 0.5 — proves cost-sensitivity, not naive 0.5
-    assert result["optimal_threshold"] < 0.5
+    with pytest.raises(ValueError, match="threshold"):
+        export_model_metadata(
+            model_path=model_path,
+            test_path=test_csv_path,
+            cv_results_path=bad_cv_path,
+            cost_config_path=cost_config_path,
+            output_path=output_path,
+        )
 
 
 # ---------------------------------------------------------------------------

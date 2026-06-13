@@ -16,6 +16,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.model_selection import (
     RandomizedSearchCV,
     StratifiedKFold,
+    cross_val_predict,
     cross_val_score,
     cross_validate,
 )
@@ -23,7 +24,9 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
+from yield_risk.config import CostMatrix, ThresholdSearchConfig
 from yield_risk.preprocess import SecomPreprocessor
+from yield_risk.thresholding import find_optimal_threshold
 
 
 def build_baseline_pipeline(random_seed: int) -> Pipeline:
@@ -314,6 +317,50 @@ def build_pipeline(
         steps.append(("scaler", StandardScaler()))
     steps.append(("classifier", spec.build(random_seed)))
     return Pipeline(steps)
+
+
+def frozen_operating_threshold(
+    estimator: Pipeline,
+    X: pd.DataFrame,
+    y: pd.Series,
+    cv_folds: int,
+    random_seed: int,
+    cost_matrix: CostMatrix,
+    threshold_search: ThresholdSearchConfig,
+) -> float:
+    """Derive the cost-optimal operating threshold from pooled OOF CV predictions.
+
+    Runs ``cross_val_predict`` over a ``StratifiedKFold`` to obtain out-of-fold
+    probability scores for every training sample (no test data is touched), then
+    calls ``find_optimal_threshold`` on those pooled predictions.  This is
+    leak-free because the embedded ``SecomPreprocessor`` is refit on each fold's
+    training split inside ``cross_val_predict``.
+
+    Args:
+        estimator: Unfitted (or fitted) sklearn Pipeline.  It is cloned
+            internally by ``cross_val_predict`` so the original is not mutated.
+        X: Training feature matrix.
+        y: Training labels (0/1).
+        cv_folds: Number of stratified folds for ``StratifiedKFold``.
+        random_seed: Random state for the ``StratifiedKFold`` shuffle,
+            ensuring reproducible fold assignments and identical OOF scores
+            across calls with the same seed.
+        cost_matrix: Per-outcome costs used by ``find_optimal_threshold``.
+        threshold_search: Grid parameters (low, high, steps) for the threshold
+            search.
+
+    Returns:
+        The threshold (float) that minimises expected cost on pooled OOF
+        predictions.  The value lies in
+        ``[threshold_search.low, threshold_search.high]``.
+    """
+    cv = StratifiedKFold(
+        n_splits=cv_folds, shuffle=True, random_state=random_seed
+    )
+    oof = cross_val_predict(estimator, X, y, cv=cv, method="predict_proba")
+    return find_optimal_threshold(
+        np.asarray(y), oof[:, 1], cost_matrix, threshold_search
+    ).threshold
 
 
 def model_feature_names(pipeline: Pipeline) -> list[str]:

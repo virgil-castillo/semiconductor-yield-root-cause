@@ -1,8 +1,13 @@
 """Generate models/model_metadata.json for the yield-risk prediction API.
 
-Loads the selected pipeline and test predictions, computes the cost-optimal
-threshold from configs/cost_config.yaml, and writes a JSON artifact that
+Loads the selected pipeline and test predictions, reads the frozen operating
+threshold from cv_results.json (produced by train_models.py from OOF train
+predictions), and writes a JSON artifact that
 ``yield_risk.scoring.load_model_bundle`` reads at serving time.
+
+The threshold is NEVER computed from test labels here.  It was frozen during
+training on pooled out-of-fold CV predictions and is read directly from the
+``"threshold"`` field of the selected entry in cv_results.json.
 """
 from __future__ import annotations
 
@@ -19,7 +24,6 @@ import pandas as pd
 from yield_risk.config import load_config, load_cost_config
 from yield_risk.evaluate import compute_metrics
 from yield_risk.model import model_feature_names
-from yield_risk.thresholding import find_optimal_threshold
 
 
 def export_model_metadata(
@@ -31,17 +35,19 @@ def export_model_metadata(
 ) -> dict[str, Any]:
     """Export model metadata to a JSON file.
 
-    Loads the selected pipeline and held-out test set, computes the
-    cost-optimal threshold, and writes a JSON artifact that
-    ``yield_risk.scoring.load_model_bundle`` reads at serving time.
+    Loads the selected pipeline and held-out test set, reads the frozen
+    operating threshold from the selected entry in cv_results.json (produced by
+    train_models.py from pooled OOF CV predictions — never from test labels),
+    applies that threshold to test to compute metrics, and writes a JSON
+    artifact that ``yield_risk.scoring.load_model_bundle`` reads at serving
+    time.
 
-    The ``metrics`` block is computed here directly from the loaded pipeline,
-    test data, and cost configuration at the cost-optimal threshold. It does not
-    depend on any file written as a side effect by another script, so the
-    served artifact is always internally consistent: ``metrics``,
-    ``optimal_threshold``, ``model_version``, ``expected_sensors``, and
-    ``selected_features`` all describe the *same* model and test set from this
-    invocation.
+    The ``metrics`` block is computed directly from the loaded pipeline, test
+    data, and the frozen threshold. It does not depend on any file written as a
+    side effect by another script, so the served artifact is always internally
+    consistent: ``metrics``, ``optimal_threshold``, ``model_version``,
+    ``expected_sensors``, and ``selected_features`` all describe the *same*
+    model and test set from this invocation.
 
     The artifact includes two feature-related fields:
 
@@ -56,6 +62,8 @@ def export_model_metadata(
         model_path: Path to the joblib-serialised selected pipeline.
         test_path: Path to the held-out test CSV (sensor cols + label).
         cv_results_path: Path to cv_results.json produced by train_models.py.
+            Each entry must contain a ``"threshold"`` key (the frozen operating
+            point derived from OOF CV predictions on the training set).
         cost_config_path: Path to cost_config.yaml.
         output_path: Destination path for model_metadata.json.
 
@@ -65,6 +73,8 @@ def export_model_metadata(
     Raises:
         FileNotFoundError: If any required input file does not exist.
         ValueError: If no entry in cv_results_path has ``selected: true``.
+        ValueError: If the selected entry in cv_results_path lacks a
+            ``"threshold"`` key (artifact produced by an older train run).
     """
     # Load pipeline
     pipeline = joblib.load(model_path)
@@ -76,26 +86,30 @@ def export_model_metadata(
     y_test = test_df["label"].to_numpy()
     y_prob = pipeline.predict_proba(X_test)[:, 1]
 
-    # Compute cost-optimal threshold
-    cost_cfg = load_cost_config(cost_config_path)
-    result = find_optimal_threshold(
-        y_test, y_prob, cost_cfg.cost_matrix, cost_cfg.threshold_search
-    )
-    optimal_threshold = float(result.threshold)
-
-    # Model family from cv_results
+    # Read frozen threshold and family from cv_results — never compute on test
     cv_results = json.loads(cv_results_path.read_text())
-    family: str | None = next(
-        (r["model"] for r in cv_results if r["selected"]), None
+    selected_entry: dict[str, Any] | None = next(
+        (r for r in cv_results if r["selected"]), None
     )
-    if family is None:
+    if selected_entry is None:
         raise ValueError(f"No selected model found in {cv_results_path}")
+    if "threshold" not in selected_entry:
+        raise ValueError(
+            f"Selected entry in {cv_results_path} lacks a 'threshold' key. "
+            "Re-run train_models.py to regenerate the artifact with frozen "
+            "thresholds derived from OOF CV predictions."
+        )
+    family: str = selected_entry["model"]
+    optimal_threshold = float(selected_entry["threshold"])
+
+    # Cost matrix (used for metadata only, not for threshold tuning on test)
+    cost_cfg = load_cost_config(cost_config_path)
 
     # Short hash: first 7 chars of sha256 of model file bytes
     short_hash = hashlib.sha256(model_path.read_bytes()).hexdigest()[:7]
     model_version = f"{family}-{short_hash}"
 
-    # Metrics computed directly at the cost-optimal threshold from the loaded
+    # Metrics computed directly at the frozen threshold from the loaded
     # pipeline + test data — never read from a side-effect file. This keeps the
     # metrics block consistent with optimal_threshold and the served model.
     metrics: dict[str, Any] = dataclasses.asdict(

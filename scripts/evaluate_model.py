@@ -1,10 +1,14 @@
 """Evaluate the selected model on the test set and build the comparison table.
 
 Loads the held-out test split exactly once. Reports the selected (winning)
-model with its cost-sensitive operating point, regenerates its diagnostic
+model at its frozen operating threshold (derived from OOF train predictions by
+train_models.py and persisted in cv_results.json), regenerates its diagnostic
 figures, and writes reports/model_comparison.{csv,json} combining the
 cross-validation metrics (from train_models.py) with test metrics for every
 family.
+
+The threshold is NEVER computed from test labels here.  Each family's frozen
+threshold is read from the ``"threshold"`` field of its cv_results.json entry.
 """
 from __future__ import annotations
 
@@ -15,14 +19,13 @@ import pandas as pd
 
 from yield_risk.config import load_config, load_cost_config
 from yield_risk.evaluate import (
-    compute_metrics,
+    evaluate_at_threshold,
     format_report,
     plot_confusion_matrix,
     plot_precision_recall_curve,
     plot_roc_curve,
     save_metrics,
 )
-from yield_risk.thresholding import find_optimal_threshold
 
 
 def main() -> None:
@@ -40,19 +43,21 @@ def main() -> None:
 
     cv_results = json.loads((cfg.paths.reports_dir / "cv_results.json").read_text())
     selected = next(r["model"] for r in cv_results if r["selected"])
+    # Build a map of family → frozen threshold (from OOF train predictions)
+    frozen_thresholds = {r["model"]: float(r["threshold"]) for r in cv_results}
 
-    # --- Selected model: report + figures at the cost-optimal threshold ---
+    # --- Selected model: report + figures at the frozen threshold ---
     pipeline = joblib.load(cfg.paths.models_dir / "selected_model.joblib")
     y_prob = pipeline.predict_proba(X_test)[:, 1]
-    opt = find_optimal_threshold(
-        y_test, y_prob, cost_cfg.cost_matrix, cost_cfg.threshold_search
+    frozen = frozen_thresholds[selected]
+    metrics, expected_cost = evaluate_at_threshold(
+        y_test, y_prob, frozen, cost_cfg.cost_matrix
     )
-    metrics = compute_metrics(y_test, y_prob, threshold=opt.threshold)
     save_metrics(metrics, cfg.paths.reports_dir / "selected_model_metrics.json")
     print(format_report(metrics, selected))
     print(
-        f"Optimal threshold: {opt.threshold:.3f}  "
-        f"expected cost: {opt.expected_cost:.1f}"
+        f"Frozen threshold: {frozen:.3f}  "
+        f"expected cost: {expected_cost:.1f}"
     )
     plot_confusion_matrix(
         metrics.confusion_matrix, cfg.paths.figures_dir / "confusion_matrix.png"
@@ -72,10 +77,10 @@ def main() -> None:
     for r in cv_results:
         fam_pipe = joblib.load(cfg.paths.models_dir / f"{r['model']}.joblib")
         fam_prob = fam_pipe.predict_proba(X_test)[:, 1]
-        fam_opt = find_optimal_threshold(
-            y_test, fam_prob, cost_cfg.cost_matrix, cost_cfg.threshold_search
+        fam_frozen = frozen_thresholds[r["model"]]
+        fam_metrics, fam_cost = evaluate_at_threshold(
+            y_test, fam_prob, fam_frozen, cost_cfg.cost_matrix
         )
-        fam_metrics = compute_metrics(y_test, fam_prob, threshold=fam_opt.threshold)
         rows.append(
             {
                 "model": r["model"],
@@ -84,8 +89,8 @@ def main() -> None:
                 "test_roc_auc": fam_metrics.roc_auc,
                 "test_recall": fam_metrics.recall,
                 "test_precision": fam_metrics.precision,
-                "opt_threshold": fam_opt.threshold,
-                "expected_cost": fam_opt.expected_cost,
+                "opt_threshold": fam_frozen,
+                "expected_cost": fam_cost,
                 "selected": r["selected"],
             }
         )
