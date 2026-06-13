@@ -17,6 +17,7 @@ dependencies = [
     "scikit-learn>=1.5",
     "xgboost>=2.0",
     "lightgbm>=4.3",
+    "optuna>=3.6",
     "shap>=0.45",
     "matplotlib>=3.8",
     "plotly>=5.20",
@@ -74,6 +75,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "lightgbm.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "optuna.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
