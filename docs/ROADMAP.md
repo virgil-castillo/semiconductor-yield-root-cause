@@ -189,3 +189,13 @@ All tiers ───── Tier 9 (Documentation)
 6. Tier 7 notebooks (fill in from working code, not a research exercise)
 7. Tier 8 infrastructure
 8. Tier 9 documentation (README last — fill in real numbers)
+
+---
+
+## Backlog — Future Experiments
+
+Not on the critical path; revisit once Tier 2 is stable.
+
+| Idea | Rationale | Status |
+|------|-----------|--------|
+| Native missing-value handling for tree models (RF, XGBoost) vs. the shared median-imputed `SecomPreprocessor` | Both `RandomForestClassifier` (sklearn ≥1.4) and `XGBClassifier` learn a per-split default direction for NaNs, so missingness can act as a learned signal (e.g., a skipped sensor reading may correlate with yield) instead of being masked by median fill. Requires a separate no-impute preprocessing branch for RF/XGB only, since `logistic_regression`/`dummy` need complete data and the variance/correlation filters currently run on imputed data — keep the existing imputed pipeline as the baseline for comparison. | ⬜ |
