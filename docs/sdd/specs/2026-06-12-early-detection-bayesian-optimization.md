@@ -3,7 +3,8 @@
 > **Umbrella design doc.** Implemented as three slices, each its own spec:
 > - **A** — leakage-safe scoring core (no Optuna):
 >   [`2026-06-12-early-detection-a-scoring-core.md`](2026-06-12-early-detection-a-scoring-core.md) ← build + verify first
-> - **B** — Optuna search, CLI, study artifacts (wraps A) — *to be drafted*
+> - **B** — Optuna search, CLI, study artifacts (wraps A):
+>   [`2026-06-13-early-detection-b-optuna-search.md`](2026-06-13-early-detection-b-optuna-search.md)
 > - **C** — full-feature baseline, comparison, early-detection curve — *to be drafted*
 
 ## Goal
