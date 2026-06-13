@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import importlib.util
+import json
 import math
+import types
 import warnings
 from pathlib import Path
 
@@ -3001,3 +3004,258 @@ def test_sanitize_nan_directly() -> None:
     json_str = json.dumps(record)
     assert "NaN" not in json_str
     json.loads(json_str)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# CLI tests — run_early_detection.py  (Spec §5 / §6)
+# ---------------------------------------------------------------------------
+
+
+def _load_cli() -> types.ModuleType:
+    """Load scripts/run_early_detection.py as a module by file path.
+
+    Returns:
+        The loaded module object.
+    """
+    script_path = (
+        Path(__file__).parent.parent / "scripts" / "run_early_detection.py"
+    )
+    spec = importlib.util.spec_from_file_location("run_early_detection", script_path)
+    assert spec is not None
+    assert spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+def _tiny_secom(n_sensors: int = 6, n_rows: int = 60) -> pd.DataFrame:
+    """Return a tiny SECOM-shaped DataFrame for fast tests.
+
+    Args:
+        n_sensors: Number of ``sensor_*`` columns to include.
+        n_rows: Total number of rows.
+
+    Returns:
+        DataFrame with columns ``timestamp``, ``sensor_000``..., ``label``.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    data: dict[str, object] = {"timestamp": list(range(n_rows))}
+    for i in range(n_sensors):
+        data[f"sensor_{i:03d}"] = rng.standard_normal(n_rows).tolist()
+    labels = [0] * (n_rows // 2) + [1] * (n_rows - n_rows // 2)
+    data["label"] = labels
+    return pd.DataFrame(data)
+
+
+def _fake_config(tmp_path: Path) -> object:
+    """Build a fake Config whose paths point at tmp_path.
+
+    Args:
+        tmp_path: Temporary directory for models/reports.
+
+    Returns:
+        A Config-like object with .paths.models_dir, .paths.reports_dir,
+        .paths.raw_dir, .run.test_size, .run.random_seed.
+    """
+    from yield_risk.config import Config, PathsConfig, RunConfig
+
+    paths = PathsConfig(
+        raw_dir=tmp_path / "raw",
+        interim_dir=tmp_path / "interim",
+        processed_dir=tmp_path / "processed",
+        models_dir=tmp_path / "models",
+        reports_dir=tmp_path / "reports",
+        figures_dir=tmp_path / "figures",
+    )
+    run = RunConfig(
+        random_seed=0,
+        test_size=0.2,
+        val_size=0.2,
+        cv_folds=2,
+        missing_threshold=0.5,
+        variance_threshold=1e-6,
+        correlation_threshold=0.95,
+    )
+    return Config(paths=paths, run=run)
+
+
+def _write_minimal_ed_yaml(tmp_path: Path) -> Path:
+    """Write a minimal early_detection config YAML to tmp_path.
+
+    Uses 2 trials, 2 CV folds, logistic_regression only for speed.
+
+    Args:
+        tmp_path: Directory to write the YAML.
+
+    Returns:
+        Path to the written YAML file.
+    """
+    yaml_path = tmp_path / "ed_cfg.yaml"
+    yaml_path.write_text(
+        "n_trials: 2\n"
+        "inner_cv_folds: 2\n"
+        "model_families:\n"
+        "  - logistic_regression\n"
+        "access_types:\n"
+        "  - prefix\n"
+        "selection_methods:\n"
+        "  - none\n",
+        encoding="utf-8",
+    )
+    return yaml_path
+
+
+# ---------------------------------------------------------------------------
+# Test: _build_overrides only includes user-supplied flags
+# ---------------------------------------------------------------------------
+
+
+def test_build_overrides_only_supplied_flags() -> None:
+    """_build_overrides returns only the keys the user actually passed."""
+    import argparse
+
+    mod = _load_cli()
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--n-trials", type=int, default=None)
+    parser.add_argument("--alpha", type=float, default=None)
+    parser.add_argument("--detection-metric", type=str, default=None)
+    parser.add_argument("--seed", type=int, default=None)
+
+    args = parser.parse_args(["--n-trials", "10", "--alpha", "0.2"])
+    overrides = mod._build_overrides(args)
+
+    assert overrides.get("n_trials") == 10
+    assert overrides.get("alpha") == pytest.approx(0.2)
+    # seed -> sampler_seed; not supplied -> None (loader will drop it)
+    assert overrides.get("sampler_seed") is None
+    assert overrides.get("detection_metric") is None
+
+
+def test_build_overrides_seed_maps_to_sampler_seed() -> None:
+    """_build_overrides maps --seed to the sampler_seed key."""
+    import argparse
+
+    mod = _load_cli()
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--n-trials", type=int, default=None)
+    parser.add_argument("--alpha", type=float, default=None)
+    parser.add_argument("--detection-metric", type=str, default=None)
+
+    args = parser.parse_args(["--seed", "99"])
+    overrides = mod._build_overrides(args)
+
+    assert overrides.get("sampler_seed") == 99
+
+
+# ---------------------------------------------------------------------------
+# Test: artifacts written by main() with monkeypatching
+# ---------------------------------------------------------------------------
+
+
+def test_main_writes_three_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """main() writes study.pkl, best.json, and trials.csv to configured dirs."""
+    mod = _load_cli()
+
+    df = _tiny_secom()
+    fake_cfg = _fake_config(tmp_path)
+    yaml_path = _write_minimal_ed_yaml(tmp_path)
+
+    monkeypatch.setattr(mod, "load_config", lambda: fake_cfg)
+    monkeypatch.setattr(mod, "load_secom", lambda raw_dir: df)
+    monkeypatch.setattr(mod, "validate_secom", lambda df_: None)
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        mod.main(["--config", str(yaml_path), "--n-trials", "2"])
+
+    models_dir = tmp_path / "models"
+    reports_dir = tmp_path / "reports"
+
+    assert (models_dir / "early_detection_study.pkl").exists()
+    assert (models_dir / "early_detection_best.json").exists()
+    assert (reports_dir / "early_detection_trials.csv").exists()
+
+
+def test_main_best_json_is_valid_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """early_detection_best.json written by main() is valid JSON."""
+    mod = _load_cli()
+
+    df = _tiny_secom()
+    fake_cfg = _fake_config(tmp_path)
+    yaml_path = _write_minimal_ed_yaml(tmp_path)
+
+    monkeypatch.setattr(mod, "load_config", lambda: fake_cfg)
+    monkeypatch.setattr(mod, "load_secom", lambda raw_dir: df)
+    monkeypatch.setattr(mod, "validate_secom", lambda df_: None)
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        mod.main(["--config", str(yaml_path), "--n-trials", "2"])
+
+    best_json_path = tmp_path / "models" / "early_detection_best.json"
+    content = best_json_path.read_text(encoding="utf-8")
+    parsed = json.loads(content)  # must not raise
+    assert "best_trial_number" in parsed
+
+
+def test_main_trials_csv_has_correct_row_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """trials CSV has one row per trial (header excluded)."""
+    mod = _load_cli()
+
+    df = _tiny_secom()
+    fake_cfg = _fake_config(tmp_path)
+    yaml_path = _write_minimal_ed_yaml(tmp_path)
+
+    monkeypatch.setattr(mod, "load_config", lambda: fake_cfg)
+    monkeypatch.setattr(mod, "load_secom", lambda raw_dir: df)
+    monkeypatch.setattr(mod, "validate_secom", lambda df_: None)
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        mod.main(["--config", str(yaml_path), "--n-trials", "2"])
+
+    csv_path = tmp_path / "reports" / "early_detection_trials.csv"
+    trials_df = pd.read_csv(csv_path)
+    assert len(trials_df) == 2  # n_trials == 2
+
+
+# ---------------------------------------------------------------------------
+# Test: n_sensors == 0 guard exits with code 1
+# ---------------------------------------------------------------------------
+
+
+def test_main_no_sensor_columns_exits_with_code_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """main() exits with code 1 when no sensor_ columns are present."""
+    mod = _load_cli()
+
+    # DataFrame with no sensor_ columns
+    df_no_sensors = pd.DataFrame(
+        {"timestamp": range(20), "label": [0] * 10 + [1] * 10}
+    )
+    fake_cfg = _fake_config(tmp_path)
+    yaml_path = _write_minimal_ed_yaml(tmp_path)
+
+    monkeypatch.setattr(mod, "load_config", lambda: fake_cfg)
+    monkeypatch.setattr(mod, "load_secom", lambda raw_dir: df_no_sensors)
+    monkeypatch.setattr(mod, "validate_secom", lambda df_: None)
+
+    with pytest.raises(SystemExit) as exc_info:
+        mod.main(["--config", str(yaml_path)])
+
+    assert exc_info.value.code == 1
