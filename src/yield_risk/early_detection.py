@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
+import optuna
 import pandas as pd
 import yaml
 from lightgbm import LGBMClassifier
@@ -1170,4 +1171,157 @@ def load_early_detection_config(
         false_alarm_rate=false_alarm_rate,
         performance_tolerance=performance_tolerance,
         curve_prefixes=curve_prefixes,
+    )
+
+
+def suggest_config(
+    trial: optuna.Trial,
+    ed_cfg: EarlyDetectionConfig,
+    n_sensors: int,
+) -> HyperparamConfig:
+    """Sample and return a fully-populated ``HyperparamConfig`` for one Optuna trial.
+
+    Uses stable Optuna parameter names so ``trials_dataframe()`` columns are
+    meaningful.  Family-specific model hyperparameters are stored under plain
+    estimator keys (not the prefixed Optuna names).
+
+    Args:
+        trial: The Optuna trial supplying ``suggest_*`` methods.
+        ed_cfg: Study-wide configuration providing search bounds and allowed
+            choices for every dimension.
+        n_sensors: Total number of raw sensor columns.  Used to bound the
+            ``prefix_end`` and window parameters.
+
+    Returns:
+        A frozen ``HyperparamConfig`` ready to be passed to ``evaluate_config``.
+    """
+    # --- Sensor access -------------------------------------------------------
+    access_type: str = trial.suggest_categorical(
+        "access_type", ed_cfg.access_types
+    )
+
+    access: SensorAccess
+    if access_type == "prefix":
+        prefix_end = trial.suggest_int("prefix_end", 1, n_sensors)
+        access = SensorAccess(access_type="prefix", prefix_end=prefix_end)
+    else:  # "window"
+        window_start = trial.suggest_int("window_start", 0, n_sensors - 1)
+        ws_high = min(ed_cfg.max_window_size, n_sensors)
+        ws_low = min(ed_cfg.min_window_size, ws_high)
+        window_size = trial.suggest_int("window_size", ws_low, ws_high)
+        access = SensorAccess(
+            access_type="window",
+            window_start=window_start,
+            window_size=window_size,
+        )
+
+    # --- Preprocessing -------------------------------------------------------
+    missing_threshold = trial.suggest_float(
+        "missing_threshold", *ed_cfg.missing_threshold
+    )
+    variance_threshold = trial.suggest_float(
+        "variance_threshold", *ed_cfg.variance_threshold, log=True
+    )
+    correlation_threshold = trial.suggest_float(
+        "correlation_threshold", *ed_cfg.correlation_threshold
+    )
+
+    # --- Feature selection ---------------------------------------------------
+    selection_method: str = trial.suggest_categorical(
+        "selection_method", ed_cfg.selection_methods
+    )
+    max_features: int | None
+    if selection_method == "none":
+        max_features = None
+    else:
+        max_features = trial.suggest_int("max_features", *ed_cfg.max_features)
+
+    # --- Model family + hyperparameters --------------------------------------
+    model_family: str = trial.suggest_categorical(
+        "model_family", ed_cfg.model_families
+    )
+    model_params: dict[str, object]
+
+    if model_family == "logistic_regression":
+        lr_c = trial.suggest_float("lr_C", 1e-3, 1e2, log=True)
+        lr_penalty: str = trial.suggest_categorical(
+            "lr_penalty", ["l1", "l2"]
+        )
+        lr_class_weight: str | None = cast(
+            "str | None",
+            trial.suggest_categorical("lr_class_weight", [None, "balanced"]),
+        )
+        model_params = {
+            "C": lr_c,
+            "penalty": lr_penalty,
+            "class_weight": lr_class_weight,
+        }
+        if lr_penalty == "l1":
+            model_params["solver"] = "liblinear"
+
+    elif model_family == "random_forest":
+        rf_n_estimators = trial.suggest_int("rf_n_estimators", 100, 800)
+        rf_max_depth = trial.suggest_int("rf_max_depth", 2, 32)
+        rf_min_samples_leaf = trial.suggest_int("rf_min_samples_leaf", 1, 20)
+        rf_max_features: str = trial.suggest_categorical(
+            "rf_max_features", ["sqrt", "log2"]
+        )
+        rf_class_weight: str | None = cast(
+            "str | None",
+            trial.suggest_categorical(
+                "rf_class_weight", [None, "balanced", "balanced_subsample"]
+            ),
+        )
+        model_params = {
+            "n_estimators": rf_n_estimators,
+            "max_depth": rf_max_depth,
+            "min_samples_leaf": rf_min_samples_leaf,
+            "max_features": rf_max_features,
+            "class_weight": rf_class_weight,
+        }
+
+    elif model_family in {"xgboost", "lightgbm"}:
+        fam = model_family
+        learning_rate = trial.suggest_float(
+            f"{fam}_learning_rate", 1e-3, 3e-1, log=True
+        )
+        n_estimators = trial.suggest_int(f"{fam}_n_estimators", 100, 800)
+        max_depth = trial.suggest_int(f"{fam}_max_depth", 2, 12)
+        subsample = trial.suggest_float(f"{fam}_subsample", 0.5, 1.0)
+        model_params = {
+            "learning_rate": learning_rate,
+            "n_estimators": n_estimators,
+            "max_depth": max_depth,
+            "subsample": subsample,
+        }
+
+    else:
+        raise ValueError(
+            f"Unknown model_family {model_family!r} in suggest_config."
+        )
+
+    # --- Threshold -----------------------------------------------------------
+    threshold_policy = ed_cfg.threshold_policy
+    threshold: float | None
+    false_alarm_rate: float | None
+
+    if threshold_policy == "tune":
+        threshold = trial.suggest_float("threshold", *ed_cfg.threshold_range)
+        false_alarm_rate = None
+    else:  # "far_constraint"
+        threshold = None
+        false_alarm_rate = ed_cfg.false_alarm_rate
+
+    return HyperparamConfig(
+        access=access,
+        missing_threshold=missing_threshold,
+        variance_threshold=variance_threshold,
+        correlation_threshold=correlation_threshold,
+        selection_method=selection_method,
+        max_features=max_features,
+        model_family=model_family,
+        model_params=model_params,
+        threshold_policy=threshold_policy,
+        threshold=threshold,
+        false_alarm_rate=false_alarm_rate,
     )

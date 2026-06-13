@@ -6,10 +6,12 @@ import math
 from pathlib import Path
 
 import numpy as np
+import optuna
 import pandas as pd
 import pytest
 
 from yield_risk.early_detection import (
+    EarlyDetectionConfig,
     HyperparamConfig,
     SensorAccess,
     latest_index,
@@ -1813,3 +1815,457 @@ def test_real_data_sanity_check() -> None:
     assert 0.10 < result.detection_metric < 0.40, (
         f"Mean PR-AUC {result.detection_metric:.3f} outside expected range [0.10, 0.40]"
     )
+
+
+# ---------------------------------------------------------------------------
+# suggest_config tests (Spec B §2)
+# ---------------------------------------------------------------------------
+
+
+def _make_ed_cfg_for_suggest(
+    access_types: list[str] | None = None,
+    model_families: list[str] | None = None,
+    selection_methods: list[str] | None = None,
+    threshold_policy: str = "tune",
+) -> EarlyDetectionConfig:
+    """Return a minimal EarlyDetectionConfig for suggest_config tests.
+
+    Args:
+        access_types: Override access_types list.
+        model_families: Override model_families list.
+        selection_methods: Override selection_methods list.
+        threshold_policy: Override threshold_policy.
+
+    Returns:
+        An EarlyDetectionConfig ready for suggest_config.
+    """
+    return EarlyDetectionConfig(
+        n_trials=10,
+        sampler_seed=0,
+        inner_cv_folds=3,
+        detection_metric="pr_auc",
+        alpha=0.1,
+        access_types=(
+            access_types if access_types is not None else ["prefix", "window"]
+        ),
+        min_window_size=2,
+        max_window_size=10,
+        model_families=(
+            model_families if model_families is not None else ["random_forest"]
+        ),
+        missing_threshold=(0.2, 0.6),
+        variance_threshold=(1e-6, 1e-2),
+        correlation_threshold=(0.85, 0.99),
+        selection_methods=(
+            selection_methods if selection_methods is not None else ["none"]
+        ),
+        max_features=(5, 50),
+        threshold_policy=threshold_policy,
+        threshold_range=(0.1, 0.8),
+        false_alarm_rate=0.1,
+        performance_tolerance=0.05,
+        curve_prefixes=[16, 32],
+    )
+
+
+def _ask_trial(study: optuna.Study) -> optuna.Trial:
+    """Return a fresh trial from the study.
+
+    Args:
+        study: An Optuna study.
+
+    Returns:
+        A trial ready for parameter suggestions.
+    """
+    return study.ask()
+
+
+def test_suggest_config_returns_hyperparam_config_for_prefix() -> None:
+    """suggest_config with access_types=['prefix'] returns a valid HyperparamConfig.
+
+    A returned HyperparamConfig with prefix access must have access_type='prefix'
+    and prefix_end >= 1.
+    """
+    from yield_risk.early_detection import suggest_config
+
+    ed_cfg = _make_ed_cfg_for_suggest(access_types=["prefix"])
+    study = optuna.create_study(
+        sampler=optuna.samplers.TPESampler(seed=0), direction="maximize"
+    )
+    trial = _ask_trial(study)
+    cfg = suggest_config(trial, ed_cfg, n_sensors=20)
+
+    assert isinstance(cfg, HyperparamConfig)
+    assert cfg.access.access_type == "prefix"
+    assert cfg.access.prefix_end is not None
+    assert cfg.access.prefix_end >= 1
+    assert cfg.access.window_start is None
+    assert cfg.access.window_size is None
+
+
+def test_suggest_config_returns_hyperparam_config_for_window() -> None:
+    """suggest_config with access_types=['window'] returns a valid HyperparamConfig.
+
+    A returned HyperparamConfig with window access must have access_type='window'
+    with valid window_start and window_size, and no prefix_end.
+    """
+    from yield_risk.early_detection import suggest_config
+
+    ed_cfg = _make_ed_cfg_for_suggest(access_types=["window"])
+    study = optuna.create_study(
+        sampler=optuna.samplers.TPESampler(seed=0), direction="maximize"
+    )
+    trial = _ask_trial(study)
+    cfg = suggest_config(trial, ed_cfg, n_sensors=20)
+
+    assert isinstance(cfg, HyperparamConfig)
+    assert cfg.access.access_type == "window"
+    assert cfg.access.window_start is not None
+    assert cfg.access.window_size is not None
+    assert cfg.access.window_start >= 0
+    assert cfg.access.window_size >= 1
+    assert cfg.access.prefix_end is None
+
+
+def test_suggest_config_selection_none_max_features_is_none() -> None:
+    """suggest_config with selection_methods=['none'] sets max_features=None.
+
+    When the only available selection method is 'none', the returned config
+    must have max_features=None and not sample a value.
+    """
+    from yield_risk.early_detection import suggest_config
+
+    ed_cfg = _make_ed_cfg_for_suggest(selection_methods=["none"])
+    study = optuna.create_study(
+        sampler=optuna.samplers.TPESampler(seed=0), direction="maximize"
+    )
+    trial = _ask_trial(study)
+    cfg = suggest_config(trial, ed_cfg, n_sensors=20)
+
+    assert cfg.selection_method == "none"
+    assert cfg.max_features is None
+
+
+def test_suggest_config_selection_non_none_max_features_is_int() -> None:
+    """suggest_config with non-none selection method sets max_features to an int.
+
+    When selection_methods=['univariate'], the returned config must have a
+    non-None integer max_features in the configured range.
+    """
+    from yield_risk.early_detection import suggest_config
+
+    ed_cfg = _make_ed_cfg_for_suggest(selection_methods=["univariate"])
+    study = optuna.create_study(
+        sampler=optuna.samplers.TPESampler(seed=0), direction="maximize"
+    )
+    trial = _ask_trial(study)
+    cfg = suggest_config(trial, ed_cfg, n_sensors=20)
+
+    assert cfg.selection_method == "univariate"
+    assert cfg.max_features is not None
+    assert isinstance(cfg.max_features, int)
+    assert ed_cfg.max_features[0] <= cfg.max_features <= ed_cfg.max_features[1]
+
+
+def test_suggest_config_logistic_regression_model_params_keys() -> None:
+    """suggest_config for logistic_regression populates C, penalty, class_weight.
+
+    The model_params dict must contain bare estimator keys C, penalty, class_weight.
+    """
+    from yield_risk.early_detection import suggest_config
+
+    ed_cfg = _make_ed_cfg_for_suggest(model_families=["logistic_regression"])
+    study = optuna.create_study(
+        sampler=optuna.samplers.TPESampler(seed=0), direction="maximize"
+    )
+    trial = _ask_trial(study)
+    cfg = suggest_config(trial, ed_cfg, n_sensors=20)
+
+    assert cfg.model_family == "logistic_regression"
+    assert "C" in cfg.model_params
+    assert "penalty" in cfg.model_params
+    assert "class_weight" in cfg.model_params
+    assert "lr_C" not in cfg.model_params
+    assert "scale_pos_weight" not in cfg.model_params
+
+
+def test_suggest_config_logistic_regression_l1_penalty_uses_liblinear() -> None:
+    """suggest_config sets solver='liblinear' whenever lr penalty=='l1'.
+
+    Runs multiple trials and checks the invariant: every config with penalty='l1'
+    must have solver='liblinear' in model_params.
+    """
+    from yield_risk.early_detection import suggest_config
+
+    ed_cfg = _make_ed_cfg_for_suggest(model_families=["logistic_regression"])
+    study = optuna.create_study(
+        sampler=optuna.samplers.TPESampler(seed=0), direction="maximize"
+    )
+    for _ in range(20):
+        trial = _ask_trial(study)
+        cfg = suggest_config(trial, ed_cfg, n_sensors=20)
+        if cfg.model_params.get("penalty") == "l1":
+            assert cfg.model_params.get("solver") == "liblinear", (
+                "penalty='l1' must force solver='liblinear'"
+            )
+
+
+def test_suggest_config_logistic_regression_l2_penalty_no_solver_override() -> None:
+    """suggest_config does NOT set solver='liblinear' when penalty=='l2'.
+
+    When penalty is 'l2', the model_params must not contain a 'solver' key.
+    """
+    from yield_risk.early_detection import suggest_config
+
+    ed_cfg = _make_ed_cfg_for_suggest(model_families=["logistic_regression"])
+    study = optuna.create_study(
+        sampler=optuna.samplers.TPESampler(seed=0), direction="maximize"
+    )
+    found_l2 = False
+    for _ in range(30):
+        trial = _ask_trial(study)
+        cfg = suggest_config(trial, ed_cfg, n_sensors=20)
+        if cfg.model_params.get("penalty") == "l2":
+            assert "solver" not in cfg.model_params, (
+                "penalty='l2' must not add solver key"
+            )
+            found_l2 = True
+            break
+    assert found_l2, "No l2 penalty sample found in 30 trials"
+
+
+def test_suggest_config_random_forest_model_params_keys() -> None:
+    """suggest_config for random_forest populates the correct bare estimator keys.
+
+    The model_params dict must contain n_estimators, max_depth, min_samples_leaf,
+    max_features, class_weight — with bare keys, not rf_-prefixed Optuna names.
+    """
+    from yield_risk.early_detection import suggest_config
+
+    ed_cfg = _make_ed_cfg_for_suggest(model_families=["random_forest"])
+    study = optuna.create_study(
+        sampler=optuna.samplers.TPESampler(seed=0), direction="maximize"
+    )
+    trial = _ask_trial(study)
+    cfg = suggest_config(trial, ed_cfg, n_sensors=20)
+
+    assert cfg.model_family == "random_forest"
+    assert "n_estimators" in cfg.model_params
+    assert "max_depth" in cfg.model_params
+    assert "min_samples_leaf" in cfg.model_params
+    assert "max_features" in cfg.model_params
+    assert "class_weight" in cfg.model_params
+    assert "rf_n_estimators" not in cfg.model_params
+    assert "scale_pos_weight" not in cfg.model_params
+
+
+def test_suggest_config_xgboost_model_params_keys() -> None:
+    """suggest_config for xgboost populates the correct bare estimator keys.
+
+    The model_params dict must contain learning_rate, n_estimators, max_depth,
+    subsample — without scale_pos_weight.
+    """
+    from yield_risk.early_detection import suggest_config
+
+    ed_cfg = _make_ed_cfg_for_suggest(model_families=["xgboost"])
+    study = optuna.create_study(
+        sampler=optuna.samplers.TPESampler(seed=0), direction="maximize"
+    )
+    trial = _ask_trial(study)
+    cfg = suggest_config(trial, ed_cfg, n_sensors=20)
+
+    assert cfg.model_family == "xgboost"
+    assert "learning_rate" in cfg.model_params
+    assert "n_estimators" in cfg.model_params
+    assert "max_depth" in cfg.model_params
+    assert "subsample" in cfg.model_params
+    assert "scale_pos_weight" not in cfg.model_params
+    assert "xgboost_learning_rate" not in cfg.model_params
+
+
+def test_suggest_config_lightgbm_model_params_keys() -> None:
+    """suggest_config for lightgbm populates the correct bare estimator keys.
+
+    The model_params dict must contain learning_rate, n_estimators, max_depth,
+    subsample — without scale_pos_weight.
+    """
+    from yield_risk.early_detection import suggest_config
+
+    ed_cfg = _make_ed_cfg_for_suggest(model_families=["lightgbm"])
+    study = optuna.create_study(
+        sampler=optuna.samplers.TPESampler(seed=0), direction="maximize"
+    )
+    trial = _ask_trial(study)
+    cfg = suggest_config(trial, ed_cfg, n_sensors=20)
+
+    assert cfg.model_family == "lightgbm"
+    assert "learning_rate" in cfg.model_params
+    assert "n_estimators" in cfg.model_params
+    assert "max_depth" in cfg.model_params
+    assert "subsample" in cfg.model_params
+    assert "scale_pos_weight" not in cfg.model_params
+    assert "lightgbm_learning_rate" not in cfg.model_params
+
+
+def test_suggest_config_never_sets_scale_pos_weight_for_any_family() -> None:
+    """suggest_config never sets scale_pos_weight for any model family.
+
+    Runs a trial for each of the four families and asserts scale_pos_weight
+    is absent from model_params in every case.
+    """
+    from yield_risk.early_detection import suggest_config
+
+    for family in ["logistic_regression", "random_forest", "xgboost", "lightgbm"]:
+        ed_cfg = _make_ed_cfg_for_suggest(model_families=[family])
+        study = optuna.create_study(
+            sampler=optuna.samplers.TPESampler(seed=0), direction="maximize"
+        )
+        trial = _ask_trial(study)
+        cfg = suggest_config(trial, ed_cfg, n_sensors=20)
+        assert "scale_pos_weight" not in cfg.model_params, (
+            f"scale_pos_weight must not be set for family '{family}'"
+        )
+
+
+def test_suggest_config_threshold_policy_tune_sets_threshold_not_far() -> None:
+    """suggest_config with threshold_policy='tune' sets threshold, not false_alarm_rate.
+
+    The returned config must have threshold in threshold_range and
+    false_alarm_rate=None.
+    """
+    from yield_risk.early_detection import suggest_config
+
+    ed_cfg = _make_ed_cfg_for_suggest(threshold_policy="tune")
+    study = optuna.create_study(
+        sampler=optuna.samplers.TPESampler(seed=0), direction="maximize"
+    )
+    trial = _ask_trial(study)
+    cfg = suggest_config(trial, ed_cfg, n_sensors=20)
+
+    assert cfg.threshold_policy == "tune"
+    assert cfg.threshold is not None
+    assert ed_cfg.threshold_range[0] <= cfg.threshold <= ed_cfg.threshold_range[1]
+    assert cfg.false_alarm_rate is None
+
+
+def test_suggest_config_far_constraint_policy_sets_far_not_threshold() -> None:
+    """suggest_config with 'far_constraint' sets false_alarm_rate, not threshold.
+
+    The returned config must have threshold=None and false_alarm_rate equal to
+    ed_cfg.false_alarm_rate.
+    """
+    from yield_risk.early_detection import suggest_config
+
+    ed_cfg = _make_ed_cfg_for_suggest(threshold_policy="far_constraint")
+    study = optuna.create_study(
+        sampler=optuna.samplers.TPESampler(seed=0), direction="maximize"
+    )
+    trial = _ask_trial(study)
+    cfg = suggest_config(trial, ed_cfg, n_sensors=20)
+
+    assert cfg.threshold_policy == "far_constraint"
+    assert cfg.threshold is None
+    assert cfg.false_alarm_rate == ed_cfg.false_alarm_rate
+
+
+def test_suggest_config_window_bounds_clamped_when_min_window_gt_n_sensors() -> None:
+    """suggest_config clamps window bounds when min_window_size > n_sensors.
+
+    When min_window_size=15 and n_sensors=5, ws_high=min(20,5)=5,
+    ws_low=min(15,5)=5. Both become 5, making suggest_int valid (low==high).
+    The returned window_size must be 5.
+    """
+    from yield_risk.early_detection import suggest_config
+
+    # Force min_window_size > n_sensors by constructing a custom config
+    ed_cfg_tiny = EarlyDetectionConfig(
+        n_trials=10,
+        sampler_seed=0,
+        inner_cv_folds=3,
+        detection_metric="pr_auc",
+        alpha=0.1,
+        access_types=["window"],
+        min_window_size=15,  # larger than n_sensors
+        max_window_size=20,  # larger than n_sensors
+        model_families=["random_forest"],
+        missing_threshold=(0.2, 0.6),
+        variance_threshold=(1e-6, 1e-2),
+        correlation_threshold=(0.85, 0.99),
+        selection_methods=["none"],
+        max_features=(5, 50),
+        threshold_policy="tune",
+        threshold_range=(0.1, 0.8),
+        false_alarm_rate=0.1,
+        performance_tolerance=0.05,
+        curve_prefixes=[16, 32],
+    )
+    study = optuna.create_study(
+        sampler=optuna.samplers.TPESampler(seed=0), direction="maximize"
+    )
+    trial = _ask_trial(study)
+    cfg = suggest_config(trial, ed_cfg_tiny, n_sensors=5)
+
+    # ws_high = min(20, 5) = 5; ws_low = min(15, 5) = 5; window_size == 5
+    assert cfg.access.window_size == 5
+
+
+def test_suggest_config_window_single_sensor_valid() -> None:
+    """suggest_config with n_sensors=1 and window access produces valid config.
+
+    window_start must be 0 (range [0, 0]) and window_size must be 1.
+    """
+    from yield_risk.early_detection import suggest_config
+
+    ed_cfg = EarlyDetectionConfig(
+        n_trials=10,
+        sampler_seed=0,
+        inner_cv_folds=3,
+        detection_metric="pr_auc",
+        alpha=0.1,
+        access_types=["window"],
+        min_window_size=1,
+        max_window_size=1,
+        model_families=["random_forest"],
+        missing_threshold=(0.2, 0.6),
+        variance_threshold=(1e-6, 1e-2),
+        correlation_threshold=(0.85, 0.99),
+        selection_methods=["none"],
+        max_features=(5, 50),
+        threshold_policy="tune",
+        threshold_range=(0.1, 0.8),
+        false_alarm_rate=0.1,
+        performance_tolerance=0.05,
+        curve_prefixes=[16, 32],
+    )
+    study = optuna.create_study(
+        sampler=optuna.samplers.TPESampler(seed=0), direction="maximize"
+    )
+    trial = _ask_trial(study)
+    cfg = suggest_config(trial, ed_cfg, n_sensors=1)
+
+    assert cfg.access.access_type == "window"
+    assert cfg.access.window_start == 0
+    assert cfg.access.window_size == 1
+
+
+def test_suggest_config_preprocessing_fields_in_bounds() -> None:
+    """suggest_config samples preprocessing floats within configured bounds.
+
+    missing_threshold, variance_threshold, and correlation_threshold must all
+    fall within their respective configured ranges.
+    """
+    from yield_risk.early_detection import suggest_config
+
+    ed_cfg = _make_ed_cfg_for_suggest()
+    study = optuna.create_study(
+        sampler=optuna.samplers.TPESampler(seed=0), direction="maximize"
+    )
+    trial = _ask_trial(study)
+    cfg = suggest_config(trial, ed_cfg, n_sensors=20)
+
+    lo, hi = ed_cfg.missing_threshold
+    assert lo <= cfg.missing_threshold <= hi
+    lo, hi = ed_cfg.variance_threshold
+    assert lo <= cfg.variance_threshold <= hi
+    lo, hi = ed_cfg.correlation_threshold
+    assert lo <= cfg.correlation_threshold <= hi
