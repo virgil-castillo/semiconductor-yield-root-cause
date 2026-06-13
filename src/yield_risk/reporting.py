@@ -158,10 +158,14 @@ def load_report_inputs(
     )
     selected_metrics = _validate_selected_model_metrics(selected_metrics_json)
     root_cause_candidates = pd.read_csv(reports_dir / "root_cause_candidates.csv")
-    sensitivity_path = reports_dir / "root_cause_model_sensitivity_summary.csv"
-    sensitivity_summary = (
-        pd.read_csv(sensitivity_path) if sensitivity_path.exists() else pd.DataFrame()
-    )
+    # The current leak-free pipeline does not regenerate a challenger
+    # sensitivity comparison. Any *_sensitivity_*.csv on disk is a stale
+    # pre-rewrite artifact computed over a different (198-feature) feature
+    # space, so we deliberately do NOT load it: mixing it with the
+    # selected-model root-cause candidates (new feature space) would produce a
+    # silently inconsistent report. The Sensitivity section degrades to an
+    # explicit "not generated" note via ``_sensitivity_text``.
+    sensitivity_summary = pd.DataFrame()
     inputs = ReportInputs(
         model_comparison=model_comparison,
         selected_model_metrics=selected_metrics,
@@ -206,8 +210,8 @@ def render_executive_summary(inputs: ReportInputs) -> str:
         xgboost_text = (
             "\n"
             f"- XGBoost held-out challenger PR-AUC: "
-            f"{_format_float(xgboost['test_pr_auc'])}; retained as a "
-            "sensitivity comparator for held-out behavior."
+            f"{_format_float(xgboost['test_pr_auc'])} (reference comparison "
+            "only; no cross-model sensitivity overlap is produced for this run)."
         )
 
     return (
@@ -264,9 +268,14 @@ def render_model_card(inputs: ReportInputs) -> str:
         f"- Test recall: {_format_float(selected['test_recall'])}\n"
         f"- Test precision: {_format_float(selected['test_precision'])}\n\n"
         "## Selection Protocol\n\n"
-        "Selection is fixed before held-out evaluation: random forest by "
-        "training-only 5-fold cross-validation PR-AUC. Held-out test metrics "
-        "measure generalization and threshold performance.\n\n"
+        f"Selection is fixed before held-out evaluation: {model_name} by the "
+        "highest one-sigma lower-confidence bound on training-only 5-fold "
+        "cross-validation PR-AUC (`selection_score = cv_pr_auc_mean - "
+        "std_penalty * cv_pr_auc_std`, with `std_penalty = 1.0`). Penalizing the "
+        "CV mean by its per-fold standard deviation favors families whose "
+        "performance is consistent across folds rather than driven by a single "
+        "high-variance fold. Held-out test metrics measure generalization and "
+        "threshold performance.\n\n"
         "## Confusion Matrix\n\n"
         f"- True positives: {true_positive}\n"
         f"- False positives: {false_positive}\n"
@@ -308,8 +317,13 @@ def render_data_card(inputs: ReportInputs) -> str:
         f"- Split: {data.train_rows} training rows "
         f"(fail rate {data.train_fail_rate:.3f}) and {data.test_rows} test rows "
         f"(fail rate {data.test_fail_rate:.3f}).\n"
-        f"- Sensor matrix: {data.sensor_count} sensor columns with overall "
-        f"missing-value rate {data.sensor_missing_rate:.3f} after preprocessing.\n\n"
+        f"- Sensor matrix: {data.sensor_count} raw sensor columns with overall "
+        f"missing-value rate {data.sensor_missing_rate:.3f}. The train/test CSVs "
+        "hold the unprocessed sensor readings (all columns, missing values "
+        "intact, no feature selection). Preprocessing — missing/variance/"
+        "correlation filtering plus median imputation — is fit per "
+        "cross-validation fold inside the model pipeline to avoid leakage, not "
+        "applied before the split.\n\n"
         "## Batch Monitoring Checks\n\n"
         f"- Missingness alerts: {missing_alerts}\n"
         f"- Feature drift alerts: {feature_alerts}\n"
@@ -628,7 +642,14 @@ def _sensitivity_text(
     top_sensor: str | None = None,
 ) -> str:
     if sensitivity_summary.empty:
-        return "## Sensitivity\n\nNo sensitivity summary artifact was available."
+        return (
+            "## Sensitivity\n\n"
+            "No challenger sensitivity comparison was generated for this run. "
+            "The current pipeline ranks root-cause candidates for the selected "
+            "model only; a cross-model (selected vs. challenger) sensitivity "
+            "overlap is not produced, so this section is intentionally omitted "
+            "rather than populated from a prior run's artifacts."
+        )
     if top_sensor is not None and "overlap_sensors" in sensitivity_summary.columns:
         overlap_values = sensitivity_summary["overlap_sensors"].astype(str)
         if overlap_values.str.contains(top_sensor, regex=False).any():

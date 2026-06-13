@@ -216,6 +216,10 @@ def test_render_executive_summary_preserves_selection_protocol(
     assert "random forest" in summary.lower()
     assert "XGBoost" in summary
     assert "not used to reopen model selection" not in summary
+    # Bug B: the XGBoost line must not claim a sensitivity-comparator role,
+    # which the root-cause report explicitly states is not produced.
+    assert "sensitivity comparator" not in summary
+    assert "no cross-model sensitivity overlap is produced" in summary
 
 
 def test_render_model_card_includes_threshold_and_confusion_matrix(
@@ -227,6 +231,10 @@ def test_render_model_card_includes_threshold_and_confusion_matrix(
     assert "## Intended Use" in model_card
     assert "## Selection Protocol" in model_card
     assert "training-only 5-fold cross-validation PR-AUC" in model_card
+    # Bug A: the Selection Protocol must describe the current LCB criterion,
+    # not the stale raw-mean wording.
+    assert "one-sigma lower-confidence bound" in model_card
+    assert "cv_pr_auc_mean - std_penalty * cv_pr_auc_std" in model_card
     assert "Selected threshold: 0.270" in model_card
     assert "True positives: 18" in model_card
     assert "False positives: 7" in model_card
@@ -235,6 +243,36 @@ def test_render_model_card_includes_threshold_and_confusion_matrix(
     assert "## Monitoring Hooks" in model_card
     assert "static-batch demonstration" not in model_card
     assert "not a substitute" not in model_card
+
+
+def test_render_model_card_selection_protocol_uses_selected_model_name(
+    report_inputs: ReportInputs,
+) -> None:
+    """Selection Protocol must name the selected model, not a hardcoded family.
+
+    When selection picks logistic_regression (the leak-free pipeline's choice),
+    the Selection Protocol prose must say "logistic regression" and must not
+    hardcode "random forest".
+    """
+    comparison = report_inputs.model_comparison
+    comparison.loc[comparison["model"] == "random_forest", "selected"] = False
+    comparison.loc[len(comparison)] = {
+        "model": "logistic_regression",
+        "cv_pr_auc_mean": 0.08,
+        "test_pr_auc": 0.15,
+        "test_roc_auc": 0.72,
+        "test_recall": 0.35,
+        "test_precision": 0.21,
+        "opt_threshold": 0.47,
+        "expected_cost": 132.0,
+        "selected": True,
+    }
+
+    model_card = render_model_card(report_inputs)
+
+    protocol = model_card.split("## Selection Protocol", 1)[1].split("##", 1)[0]
+    assert "logistic regression" in protocol
+    assert "random forest" not in protocol
 
 
 def test_render_data_card_states_dataset_facts(
@@ -248,6 +286,22 @@ def test_render_data_card_states_dataset_facts(
     assert "anonymous sensor" in data_card
     assert "not live telemetry" not in data_card
     assert "caveat" not in data_card.lower()
+
+
+def test_render_data_card_describes_raw_split_not_preprocessed(
+    report_inputs: ReportInputs,
+) -> None:
+    """Data card must state the split is raw and preprocessing is per-fold.
+
+    Under the leak-free pipeline, train.csv/test.csv hold unprocessed sensor
+    readings; preprocessing happens per CV fold inside the model. The old
+    "after preprocessing" phrasing was misleading and must be gone.
+    """
+    data_card = render_data_card(report_inputs)
+
+    assert "raw sensor columns" in data_card
+    assert "per cross-validation fold" in data_card
+    assert "after preprocessing" not in data_card
 
 
 def test_render_root_cause_report_leads_with_top_sensor_and_next_action(
@@ -373,6 +427,48 @@ def test_multiple_selected_model_rows_raise_value_error(
 
     with pytest.raises(ValueError, match="model_comparison"):
         render_executive_summary(report_inputs)
+
+
+def test_load_report_inputs_ignores_stale_sensitivity_file(
+    tmp_path: Path,
+    model_comparison: pd.DataFrame,
+    root_cause_candidates: pd.DataFrame,
+    selected_metrics: dict[str, float | int | str],
+    monitoring_summary: MonitoringSummary,
+) -> None:
+    """A stale on-disk sensitivity CSV must NOT be loaded into report inputs.
+
+    The current pipeline does not regenerate challenger sensitivity data, so any
+    such file is a pre-rewrite artifact over an old feature space. Loading it
+    would mix feature spaces in the report.
+    """
+    model_comparison.to_csv(tmp_path / "model_comparison.csv", index=False)
+    root_cause_candidates.to_csv(tmp_path / "root_cause_candidates.csv", index=False)
+    (tmp_path / "selected_model_metrics.json").write_text(
+        json.dumps(selected_metrics), encoding="utf-8"
+    )
+    # Plant a stale sensitivity artifact on disk.
+    pd.DataFrame({"top_n": [5], "overlap_count": [4]}).to_csv(
+        tmp_path / "root_cause_model_sensitivity_summary.csv", index=False
+    )
+    train = pd.DataFrame({"sensor_001": [1.0, 2.0], "label": [0, 1]})
+    test = pd.DataFrame({"sensor_001": [3.0, 4.0], "label": [0, 1]})
+
+    inputs = load_report_inputs(tmp_path, train, test, monitoring_summary)
+
+    assert inputs.sensitivity_summary.empty
+
+
+def test_root_cause_report_marks_sensitivity_unavailable_when_absent(
+    report_inputs: ReportInputs,
+) -> None:
+    """With no sensitivity data, the report states the section is not generated."""
+    report_inputs.sensitivity_summary = pd.DataFrame()
+
+    root_cause_report = render_root_cause_report(report_inputs)
+
+    assert "## Sensitivity" in root_cause_report
+    assert "No challenger sensitivity comparison was generated" in root_cause_report
 
 
 def test_summarize_processed_data_rejects_test_only_sensor_columns() -> None:
