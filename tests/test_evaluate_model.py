@@ -135,7 +135,7 @@ def artifact_root(tmp_path: Path) -> Path:
     Returns:
         The ``tmp_path`` root; subdirectories are created inside.
     """
-    for subdir in ("processed", "models", "reports", "figures", "raw", "interim"):
+    for subdir in ("splits", "models", "reports", "figures", "raw", "interim"):
         (tmp_path / subdir).mkdir()
     return tmp_path
 
@@ -145,7 +145,7 @@ def populated_artifacts(artifact_root: Path) -> dict[str, Path]:
     """Populate all artifact files required by evaluate_model.main().
 
     Writes:
-    - ``processed/test.csv`` — small test frame.
+    - ``splits/test.csv`` — small test frame.
     - ``models/<family>.joblib`` — fitted pipeline per family.
     - ``models/selected_model.joblib`` — copy of the selected family's pipeline.
     - ``reports/cv_results.json`` — one entry per family with frozen threshold.
@@ -158,7 +158,7 @@ def populated_artifacts(artifact_root: Path) -> dict[str, Path]:
 
     # Test CSV
     test_df = _make_test_frame(rng)
-    test_csv = root / "processed" / "test.csv"
+    test_csv = root / "splits" / "test.csv"
     test_df.to_csv(test_csv, index=False)
 
     # Train data for fitting pipelines
@@ -210,7 +210,7 @@ def fake_config(artifact_root: Path) -> Config:
         paths=PathsConfig(
             raw_dir=root / "raw",
             interim_dir=root / "interim",
-            processed_dir=root / "processed",
+            splits_dir=root / "splits",
             models_dir=root / "models",
             reports_dir=root / "reports",
             figures_dir=root / "figures",

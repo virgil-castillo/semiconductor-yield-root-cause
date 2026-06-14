@@ -33,7 +33,7 @@ def main() -> None:
     cfg = load_config()
     cost_cfg = load_cost_config()
 
-    test = pd.read_csv(cfg.paths.processed_dir / "test.csv")
+    test = pd.read_csv(cfg.paths.splits_dir / "test.csv")
     sensor_cols = [c for c in test.columns if c.startswith("sensor_")]
     X_test = test[sensor_cols]
     y_test = test["label"].to_numpy()

@@ -60,11 +60,11 @@ def generate_reports(config_path: Path = Path("configs/config.yaml")) -> None:
 
     Raises:
         FileNotFoundError: If required configured artifacts are absent.
-        ValueError: If processed data or comparison artifacts are invalid.
+        ValueError: If split data or comparison artifacts are invalid.
     """
     cfg = load_config(config_path)
-    train = pd.read_csv(cfg.paths.processed_dir / "train.csv")
-    test = pd.read_csv(cfg.paths.processed_dir / "test.csv")
+    train = pd.read_csv(cfg.paths.splits_dir / "train.csv")
+    test = pd.read_csv(cfg.paths.splits_dir / "test.csv")
     sensor_cols = _sensor_columns(test)
     if not sensor_cols:
         raise ValueError(

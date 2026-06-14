@@ -39,8 +39,8 @@ def main() -> None:
     pipeline = joblib.load(model_path)
     print(f"Loaded model from {model_path}")
 
-    train = pd.read_csv(cfg.paths.processed_dir / "train.csv")
-    test = pd.read_csv(cfg.paths.processed_dir / "test.csv")
+    train = pd.read_csv(cfg.paths.splits_dir / "train.csv")
+    test = pd.read_csv(cfg.paths.splits_dir / "test.csv")
     sensor_cols = [c for c in test.columns if c.startswith("sensor_")]
     if not sensor_cols:
         raise ValueError(

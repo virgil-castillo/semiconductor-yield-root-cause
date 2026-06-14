@@ -144,7 +144,7 @@ def main() -> None:
     """
     cfg = load_config()
     model_path = cfg.paths.models_dir / "selected_model.joblib"
-    test_path = cfg.paths.processed_dir / "test.csv"
+    test_path = cfg.paths.splits_dir / "test.csv"
     cv_results_path = cfg.paths.reports_dir / "cv_results.json"
     cost_config_path = Path("configs/cost_config.yaml")
     output_path = cfg.paths.models_dir / "model_metadata.json"

@@ -30,7 +30,7 @@ def main() -> None:
     model_cfg = load_model_config()
     cost_cfg = load_cost_config()
 
-    train = pd.read_csv(cfg.paths.processed_dir / "train.csv")
+    train = pd.read_csv(cfg.paths.splits_dir / "train.csv")
     sensor_cols = [c for c in train.columns if c.startswith("sensor_")]
     X_train = train[sensor_cols]
     y_train = train["label"]

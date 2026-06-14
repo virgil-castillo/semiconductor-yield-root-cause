@@ -63,7 +63,7 @@ def main() -> None:
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path("data/processed/test.csv"),
+        default=Path("data/splits/test.csv"),
         help="Path to input CSV.",
     )
     parser.add_argument(
