@@ -333,13 +333,13 @@ def test_main_writes_selected_model_metrics_json(
     assert (fake_config.paths.reports_dir / "selected_model_metrics.json").exists()
 
 
-def test_model_comparison_opt_threshold_equals_frozen_threshold(
+def test_model_comparison_frozen_threshold_equals_frozen_threshold(
     populated_artifacts: dict[str, Path],
     fake_config: Config,
     fake_cost_config: CostConfig,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Each family's opt_threshold in model_comparison.json equals the frozen value.
+    """Each family's frozen_threshold in model_comparison.json equals the frozen value.
 
     Proves the threshold written to the comparison report is the frozen value
     read from cv_results.json, not a recomputed one derived from test labels.
@@ -354,7 +354,7 @@ def test_model_comparison_opt_threshold_equals_frozen_threshold(
     for row in rows:
         family = row["model"]
         expected_threshold = FROZEN_THRESHOLDS[family]
-        assert row["opt_threshold"] == pytest.approx(expected_threshold), (
+        assert row["frozen_threshold"] == pytest.approx(expected_threshold), (
             f"Family '{family}': expected frozen threshold {expected_threshold}, "
-            f"got {row['opt_threshold']}"
+            f"got {row['frozen_threshold']}"
         )

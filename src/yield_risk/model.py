@@ -331,10 +331,10 @@ def frozen_operating_threshold(
     """Derive the cost-optimal operating threshold from pooled OOF CV predictions.
 
     Runs ``cross_val_predict`` over a ``StratifiedKFold`` to obtain out-of-fold
-    probability scores for every training sample (no test data is touched), then
-    calls ``find_optimal_threshold`` on those pooled predictions.  This is
-    leak-free because the embedded ``SecomPreprocessor`` is refit on each fold's
-    training split inside ``cross_val_predict``.
+    probability scores for every training sample, then calls
+    ``find_optimal_threshold`` on those pooled predictions. The embedded
+    ``SecomPreprocessor`` is refit on each fold's training split inside
+    ``cross_val_predict``.
 
     Args:
         estimator: Unfitted (or fitted) sklearn Pipeline.  It is cloned

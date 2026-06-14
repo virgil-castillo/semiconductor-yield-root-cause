@@ -19,7 +19,7 @@ MODEL_COMPARISON_COLUMNS = {
     "test_roc_auc",
     "test_recall",
     "test_precision",
-    "opt_threshold",
+    "frozen_threshold",
     "expected_cost",
     "selected",
 }
@@ -541,7 +541,7 @@ def _selected_threshold(inputs: ReportInputs, selected: pd.Series) -> float:
     metric_threshold = inputs.selected_model_metrics.get("threshold")
     if metric_threshold is not None:
         return _coerce_float(metric_threshold)
-    return float(selected["opt_threshold"])
+    return float(selected["frozen_threshold"])
 
 
 def _metric_int(metrics: Mapping[str, object], key: str) -> int:

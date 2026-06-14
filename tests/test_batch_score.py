@@ -151,7 +151,7 @@ class TestScoreBatch:
     ) -> None:
         """The caller-supplied threshold wins over the bundle's metadata threshold.
 
-        Writes a model_metadata.json with optimal_threshold=0.01, then calls
+        Writes a model_metadata.json with frozen_threshold=0.01, then calls
         score_batch with threshold=0.9.  The fixed seeds produce scores in
         [0.43, 0.55], so every score is >= 0.01 but < 0.9.  If the metadata
         threshold leaked through, all labels would be 1; with threshold=0.9 they
@@ -163,7 +163,7 @@ class TestScoreBatch:
 
         # Write metadata with a very low threshold (0.01) beside the model.
         metadata = {
-            "optimal_threshold": 0.01,
+            "frozen_threshold": 0.01,
             "model_version": "test-v1",
             "expected_sensors": SENSOR_COLS,
         }

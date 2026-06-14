@@ -82,8 +82,7 @@ def evaluate_at_threshold(
 
     Computes ``ClassificationMetrics`` via :func:`compute_metrics` and expected
     cost via :func:`~yield_risk.thresholding.expected_cost_at_threshold`, both
-    at *threshold*.  This helper never calls ``find_optimal_threshold`` — it
-    only applies an already-decided threshold to test data.
+    at *threshold*.
 
     Args:
         y_true: Ground-truth binary labels (0 or 1), shape (n_samples,).

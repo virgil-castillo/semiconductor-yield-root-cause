@@ -77,7 +77,7 @@ def load_model_bundle(
 
     When the file exists, ``expected_sensors`` is taken from it if recorded,
     otherwise derived from the pipeline's ``feature_names_in_`` attribute;
-    ``optimal_threshold`` and ``model_version`` are required.
+    ``frozen_threshold`` and ``model_version`` are required.
 
     Args:
         model_path: Path to the joblib-serialised sklearn Pipeline.
@@ -91,7 +91,7 @@ def load_model_bundle(
     Raises:
         FileNotFoundError: If *model_path* does not exist.
         ValueError: If *metadata_path* exists but is missing a required key
-            (``optimal_threshold`` or ``model_version``).
+            (``frozen_threshold`` or ``model_version``).
     """
     pipeline: Pipeline = joblib.load(model_path)
 
@@ -102,7 +102,7 @@ def load_model_bundle(
         with metadata_path.open() as fh:
             meta: dict[str, Any] = json.load(fh)
         try:
-            threshold = float(meta["optimal_threshold"])
+            threshold = float(meta["frozen_threshold"])
             model_version = str(meta["model_version"])
         except KeyError as exc:
             raise ValueError(

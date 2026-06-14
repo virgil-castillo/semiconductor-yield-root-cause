@@ -57,7 +57,7 @@ def tmp_model_with_metadata(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
     joblib.dump(pipeline, model_path)
     metadata: dict[str, Any] = {
         "model_version": "v1.2.3",
-        "optimal_threshold": 0.35,
+        "frozen_threshold": 0.35,
         "expected_sensors": SENSOR_COLS,
     }
     (tmp_path / "model_metadata.json").write_text(json.dumps(metadata))
@@ -76,13 +76,13 @@ def bundle(tmp_model_with_metadata: tuple[Path, dict[str, Any]]) -> ModelBundle:
 # ---------------------------------------------------------------------------
 
 
-def test_load_model_bundle_reads_optimal_threshold(
+def test_load_model_bundle_reads_frozen_threshold(
     tmp_model_with_metadata: tuple[Path, dict[str, Any]],
 ) -> None:
-    """Threshold comes from metadata's optimal_threshold key."""
+    """Threshold comes from metadata's frozen_threshold key."""
     model_path, metadata = tmp_model_with_metadata
     result = load_model_bundle(model_path)
-    assert result.threshold == metadata["optimal_threshold"]
+    assert result.threshold == metadata["frozen_threshold"]
 
 
 def test_load_model_bundle_reads_model_version(
@@ -119,16 +119,16 @@ def test_load_model_bundle_raises_value_error_on_missing_metadata_key(
     pipeline = _make_pipeline()
     model_path = tmp_path / "model.joblib"
     joblib.dump(pipeline, model_path)
-    # Write metadata that is missing 'optimal_threshold'
+    # Write metadata that is missing 'frozen_threshold'
     incomplete_metadata = {
         "model_version": "v1.2.3",
         "expected_sensors": SENSOR_COLS,
-        # 'optimal_threshold' deliberately omitted
+        # 'frozen_threshold' deliberately omitted
     }
     metadata_path = tmp_path / "model_metadata.json"
     metadata_path.write_text(json.dumps(incomplete_metadata))
 
-    with pytest.raises(ValueError, match="optimal_threshold"):
+    with pytest.raises(ValueError, match="frozen_threshold"):
         load_model_bundle(model_path)
 
 
@@ -145,7 +145,7 @@ def test_load_model_bundle_metadata_without_expected_sensors_falls_back(
     model_path = tmp_path / "model.joblib"
     joblib.dump(pipeline, model_path)
     metadata = {
-        "optimal_threshold": 0.2,
+        "frozen_threshold": 0.2,
         "model_version": "v9.9.9",
         # 'expected_sensors' deliberately omitted
     }

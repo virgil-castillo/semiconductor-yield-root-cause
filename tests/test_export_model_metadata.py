@@ -204,20 +204,20 @@ def test_model_version_short_hash(
 
 
 # ---------------------------------------------------------------------------
-# Tests — optimal_threshold
+# Tests — frozen_threshold
 # ---------------------------------------------------------------------------
 
 
-def test_optimal_threshold_is_float(metadata: dict[str, Any]) -> None:
-    """optimal_threshold is a Python float."""
-    assert isinstance(metadata["optimal_threshold"], float)
+def test_frozen_threshold_is_float(metadata: dict[str, Any]) -> None:
+    """frozen_threshold is a Python float."""
+    assert isinstance(metadata["frozen_threshold"], float)
 
 
-def test_optimal_threshold_is_frozen_from_cv_results(
+def test_frozen_threshold_is_frozen_from_cv_results(
     metadata: dict[str, Any],
     cv_results_path: Path,
 ) -> None:
-    """optimal_threshold equals the selected entry's frozen threshold from cv_results.
+    """frozen_threshold equals the selected entry's frozen threshold from cv_results.
 
     After the second-leak fix, export_model_metadata reads the threshold from
     the cv_results.json artifact (produced by train_models.py using OOF train
@@ -225,7 +225,7 @@ def test_optimal_threshold_is_frozen_from_cv_results(
     """
     cv_data = json.loads(cv_results_path.read_text())
     selected_entry = next(r for r in cv_data if r["selected"])
-    assert metadata["optimal_threshold"] == float(selected_entry["threshold"])
+    assert metadata["frozen_threshold"] == float(selected_entry["threshold"])
 
 
 def test_export_never_calls_find_optimal_threshold_on_test(
@@ -360,13 +360,13 @@ def test_metrics_computed_directly_from_model_and_test_data(
     y_true = df["label"].to_numpy()
     y_prob = pipeline.predict_proba(df[sensor_cols])[:, 1]
     expected = dataclasses.asdict(
-        compute_metrics(y_true, y_prob, threshold=metadata["optimal_threshold"])
+        compute_metrics(y_true, y_prob, threshold=metadata["frozen_threshold"])
     )
-    expected["threshold"] = metadata["optimal_threshold"]
+    expected["threshold"] = metadata["frozen_threshold"]
     assert metadata["metrics"] == expected
 
 
-def test_metrics_threshold_matches_optimal_threshold(
+def test_metrics_threshold_matches_frozen_threshold(
     metadata: dict[str, Any],
 ) -> None:
     """The metrics block's threshold is the exported cost-optimal threshold.
@@ -374,7 +374,7 @@ def test_metrics_threshold_matches_optimal_threshold(
     Ensures internal consistency between the metrics snapshot and the served
     operating point.
     """
-    assert metadata["metrics"]["threshold"] == metadata["optimal_threshold"]
+    assert metadata["metrics"]["threshold"] == metadata["frozen_threshold"]
 
 
 # ---------------------------------------------------------------------------

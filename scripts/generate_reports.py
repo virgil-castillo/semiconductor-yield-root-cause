@@ -130,12 +130,14 @@ def _score_batch(pipeline: _ProbabilityEstimator, features: pd.DataFrame) -> np.
 def _selected_threshold(model_comparison: pd.DataFrame) -> float:
     if "selected" not in model_comparison.columns:
         raise ValueError("model_comparison.csv missing required column: selected")
-    if "opt_threshold" not in model_comparison.columns:
-        raise ValueError("model_comparison.csv missing required column: opt_threshold")
+    if "frozen_threshold" not in model_comparison.columns:
+        raise ValueError(
+            "model_comparison.csv missing required column: frozen_threshold"
+        )
     selected_rows = model_comparison[model_comparison["selected"].astype(bool)]
     if len(selected_rows) != 1:
         raise ValueError("model_comparison.csv must contain exactly one selected row.")
-    return float(selected_rows.iloc[0]["opt_threshold"])
+    return float(selected_rows.iloc[0]["frozen_threshold"])
 
 
 if __name__ == "__main__":

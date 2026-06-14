@@ -1,13 +1,10 @@
 """Generate models/model_metadata.json for the yield-risk prediction API.
 
 Loads the selected pipeline and test predictions, reads the frozen operating
-threshold from cv_results.json (produced by train_models.py from OOF train
-predictions), and writes a JSON artifact that
-``yield_risk.scoring.load_model_bundle`` reads at serving time.
-
-The threshold is NEVER computed from test labels here.  It was frozen during
-training on pooled out-of-fold CV predictions and is read directly from the
-``"threshold"`` field of the selected entry in cv_results.json.
+threshold from the ``"threshold"`` field of the selected entry in
+cv_results.json (produced by train_models.py from OOF train predictions), and
+writes a JSON artifact that ``yield_risk.scoring.load_model_bundle`` reads at
+serving time.
 """
 from __future__ import annotations
 
@@ -36,18 +33,15 @@ def export_model_metadata(
     """Export model metadata to a JSON file.
 
     Loads the selected pipeline and held-out test set, reads the frozen
-    operating threshold from the selected entry in cv_results.json (produced by
-    train_models.py from pooled OOF CV predictions — never from test labels),
-    applies that threshold to test to compute metrics, and writes a JSON
-    artifact that ``yield_risk.scoring.load_model_bundle`` reads at serving
-    time.
+    operating threshold from the selected entry in cv_results.json, applies
+    that threshold to test to compute metrics, and writes a JSON artifact that
+    ``yield_risk.scoring.load_model_bundle`` reads at serving time.
 
     The ``metrics`` block is computed directly from the loaded pipeline, test
-    data, and the frozen threshold. It does not depend on any file written as a
-    side effect by another script, so the served artifact is always internally
-    consistent: ``metrics``, ``optimal_threshold``, ``model_version``,
-    ``expected_sensors``, and ``selected_features`` all describe the *same*
-    model and test set from this invocation.
+    data, and the frozen threshold, so the served artifact's ``metrics``,
+    ``frozen_threshold``, ``model_version``, ``expected_sensors``, and
+    ``selected_features`` all describe the same model and test set from this
+    invocation.
 
     The artifact includes two feature-related fields:
 
@@ -100,7 +94,7 @@ def export_model_metadata(
             "thresholds derived from OOF CV predictions."
         )
     family: str = selected_entry["model"]
-    optimal_threshold = float(selected_entry["threshold"])
+    frozen_threshold = float(selected_entry["threshold"])
 
     # Cost matrix (used for metadata only, not for threshold tuning on test)
     cost_cfg = load_cost_config(cost_config_path)
@@ -110,17 +104,17 @@ def export_model_metadata(
     model_version = f"{family}-{short_hash}"
 
     # Metrics computed directly at the frozen threshold from the loaded
-    # pipeline + test data — never read from a side-effect file. This keeps the
-    # metrics block consistent with optimal_threshold and the served model.
+    # pipeline + test data, keeping the metrics block consistent with
+    # frozen_threshold and the served model.
     metrics: dict[str, Any] = dataclasses.asdict(
-        compute_metrics(y_test, y_prob, threshold=optimal_threshold)
+        compute_metrics(y_test, y_prob, threshold=frozen_threshold)
     )
-    metrics["threshold"] = optimal_threshold
+    metrics["threshold"] = frozen_threshold
 
     # Assemble metadata dict
     metadata: dict[str, Any] = {
         "model_version": model_version,
-        "optimal_threshold": optimal_threshold,
+        "frozen_threshold": frozen_threshold,
         "cost_matrix": dataclasses.asdict(cost_cfg.cost_matrix),
         "created_at": datetime.now(UTC).isoformat(),
         "metrics": metrics,

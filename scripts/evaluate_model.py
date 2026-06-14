@@ -6,9 +6,6 @@ train_models.py and persisted in cv_results.json), regenerates its diagnostic
 figures, and writes reports/model_comparison.{csv,json} combining the
 cross-validation metrics (from train_models.py) with test metrics for every
 family.
-
-The threshold is NEVER computed from test labels here.  Each family's frozen
-threshold is read from the ``"threshold"`` field of its cv_results.json entry.
 """
 from __future__ import annotations
 
@@ -89,7 +86,7 @@ def main() -> None:
                 "test_roc_auc": fam_metrics.roc_auc,
                 "test_recall": fam_metrics.recall,
                 "test_precision": fam_metrics.precision,
-                "opt_threshold": fam_frozen,
+                "frozen_threshold": fam_frozen,
                 "expected_cost": fam_cost,
                 "selected": r["selected"],
             }
