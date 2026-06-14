@@ -127,7 +127,6 @@ semiconductor-yield-root-cause/
 ├── notebooks/
 │   ├── 01_eda.ipynb
 │   ├── 02_eda_yield_patterns.ipynb
-│   ├── 03_baseline_results.ipynb
 │   ├── 04_model_training_evaluation.ipynb
 │   ├── 05_root_cause_analysis.ipynb
 │   ├── 05_2_xgboost_root_cause_sensitivity.ipynb
