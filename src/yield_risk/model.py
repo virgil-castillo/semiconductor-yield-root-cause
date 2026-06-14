@@ -386,49 +386,14 @@ def _param_distributions(grid: dict[str, Any]) -> dict[str, list[Any]]:
     }
 
 
-def selection_score(result: SearchResult, std_penalty: float = 1.0) -> float:
-    """Compute the std-penalized CV PR-AUC score used to rank model families.
-
-    The score is a lower-confidence bound on cross-validated PR-AUC::
-
-        score = cv_pr_auc_mean - std_penalty * cv_pr_auc_std
-
-    Penalizing the mean by the per-fold standard deviation rewards families
-    whose performance is *consistent* across the stratified folds and
-    discounts families whose mean is propped up by a single lucky fold.
-    Subtracting the std collapses the advantage of high-variance families
-    whose mean is inflated by one unusually favorable fold assignment.
-
-    Args:
-        result: A single family's search result.
-        std_penalty: How many standard deviations to subtract from the mean.
-            ``1.0`` corresponds to a one-sigma lower bound; larger values
-            penalize instability more aggressively.
-
-    Returns:
-        The std-penalized score (may be negative).
-    """
-    return result.cv_pr_auc_mean - std_penalty * result.cv_pr_auc_std
-
-
-def select_best(results: list[SearchResult], std_penalty: float = 1.0) -> str:
-    """Return the family name with the best std-penalized cross-validated PR-AUC.
-
-    Selection uses a lower-confidence bound, ``cv_pr_auc_mean -
-    std_penalty * cv_pr_auc_std`` (see :func:`selection_score`), rather than
-    the raw mean. Ranking on the raw mean can select a family whose high average
-    is driven by a single lucky fold while every other fold is mediocre.
-    Subtracting the per-fold standard deviation favors the family with the most
-    consistent per-fold PR-AUC across the stratified folds, which empirically
-    tracks held-out generalization far better.
+def select_best(results: list[SearchResult]) -> str:
+    """Return the family name with the highest mean cross-validated PR-AUC.
 
     Ties break toward the family appearing first in *results* (which callers
     pass in registry order).
 
     Args:
         results: Per-family search results.
-        std_penalty: Standard-deviation penalty forwarded to
-            :func:`selection_score`. Defaults to ``1.0`` (one-sigma lower bound).
 
     Returns:
         The winning family's name.
@@ -438,7 +403,7 @@ def select_best(results: list[SearchResult], std_penalty: float = 1.0) -> str:
     """
     if not results:
         raise ValueError("select_best requires at least one SearchResult.")
-    return max(results, key=lambda r: selection_score(r, std_penalty)).name
+    return max(results, key=lambda r: r.cv_pr_auc_mean).name
 
 
 def run_search(

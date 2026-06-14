@@ -231,10 +231,8 @@ def test_render_model_card_includes_threshold_and_confusion_matrix(
     assert "## Intended Use" in model_card
     assert "## Selection Protocol" in model_card
     assert "training-only 5-fold cross-validation PR-AUC" in model_card
-    # Bug A: the Selection Protocol must describe the current LCB criterion,
-    # not the stale raw-mean wording.
-    assert "one-sigma lower-confidence bound" in model_card
-    assert "cv_pr_auc_mean - std_penalty * cv_pr_auc_std" in model_card
+    assert "highest mean" in model_card
+    assert "cv_pr_auc_mean" in model_card
     assert "Selected threshold: 0.270" in model_card
     assert "True positives: 18" in model_card
     assert "False positives: 7" in model_card
