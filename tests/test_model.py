@@ -15,7 +15,6 @@ from yield_risk.model import (
     build_baseline_pipeline,
     build_pipeline,
     compute_fold_diagnostics,
-    cross_validate_model,
     frozen_operating_threshold,
     model_feature_names,
     run_search,
@@ -102,30 +101,13 @@ class TestTrainModel:
         assert proba.max() <= 1.0
 
 
-class TestCrossValidateModel:
-    def test_returns_expected_keys(
-        self,
-        synthetic_data: tuple[pd.DataFrame, pd.Series],
-    ) -> None:
-        X, y = synthetic_data
-        pipeline = build_pipeline(
-            "logistic_regression", random_seed=42, **_THRESH
-        )
-        results = cross_validate_model(pipeline, X, y, cv_folds=3, random_seed=42)
-        assert "test_roc_auc" in results
-        assert "test_f1" in results
+class TestStratifiedCvSplits:
+    """Tests for the shared stratified CV splitting strategy.
 
-    def test_per_fold_scores_length(
-        self,
-        synthetic_data: tuple[pd.DataFrame, pd.Series],
-    ) -> None:
-        X, y = synthetic_data
-        pipeline = build_pipeline(
-            "logistic_regression", random_seed=42, **_THRESH
-        )
-        results = cross_validate_model(pipeline, X, y, cv_folds=3, random_seed=42)
-        assert len(results["test_roc_auc"]) == 3
-        assert len(results["test_f1"]) == 3
+    ``compute_fold_diagnostics`` and ``run_search`` both split with
+    ``StratifiedKFold(shuffle=True)``. These tests pin down the splitting
+    behavior that flow relies on.
+    """
 
     def test_uses_stratified_splits(
         self,
@@ -142,18 +124,6 @@ class TestCrossValidateModel:
                 f"Fold prevalence {fold_prevalence:.3f} deviates from overall "
                 f"{overall_prevalence:.3f} by more than 0.10"
             )
-
-    def test_zero_positive_fold_raises_value_error(self) -> None:
-        """cross_validate_model raises ValueError when a fold has no positives."""
-        rng = np.random.default_rng(0)
-        X = pd.DataFrame(rng.normal(0, 1, (30, 5)), columns=[f"f{i}" for i in range(5)])
-        # Only ONE positive total — StratifiedKFold(3) cannot place a positive
-        # in every fold so the guard raises.
-        labels = [1] + [0] * 29
-        y = pd.Series(labels)
-        pipeline = build_pipeline("random_forest", random_seed=42, **_THRESH)
-        with pytest.raises(ValueError, match="[Ff]old"):
-            cross_validate_model(pipeline, X, y, cv_folds=3, random_seed=42)
 
 
 class TestModelRegistry:
@@ -563,14 +533,15 @@ class TestRawNaNPredictProba:
 
 
 class TestPerFoldRefit:
-    """Spec acceptance: cross_validate_model clones+refits the pipeline per fold.
+    """Spec acceptance: the CV flow clones+refits the pipeline per fold.
 
-    This test directly mirrors how cross_validate_model uses sklearn's
-    cross_validate (which clones the pipeline per fold and refits the 'preprocess'
-    step on that fold's training data only). By iterating the same StratifiedKFold
-    and fitting a fresh SecomPreprocessor per fold, we prove the learned statistics
-    (medians_, kept_columns_) genuinely differ between shuffled training subsets —
-    confirming that no shared/global statistics could be leaking.
+    This test directly mirrors how ``compute_fold_diagnostics`` and
+    ``run_search`` cross-validate (cloning the pipeline per fold and refitting
+    the 'preprocess' step on that fold's training data only). By iterating the
+    same StratifiedKFold and fitting a fresh SecomPreprocessor per fold, we
+    prove the learned statistics (medians_, kept_columns_) genuinely differ
+    between shuffled training subsets — confirming that no shared/global
+    statistics could be leaking.
     """
 
     def test_preprocessor_state_differs_across_folds(self) -> None:
@@ -625,7 +596,7 @@ class TestPerFoldRefit:
             labels[i] = 1
         y = pd.Series(labels)
 
-        # Use the same StratifiedKFold that cross_validate_model uses.
+        # Use the same StratifiedKFold that the CV flow uses.
         cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
         pp_kwargs = dict(
             missing_threshold=0.6,

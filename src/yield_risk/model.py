@@ -18,7 +18,6 @@ from sklearn.model_selection import (
     StratifiedKFold,
     cross_val_predict,
     cross_val_score,
-    cross_validate,
 )
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -101,40 +100,6 @@ def _check_positive_per_fold(
                 "examples. PR-AUC is undefined. Ensure positives are spread "
                 "across the dataset before calling cross-validation."
             )
-
-
-def cross_validate_model(
-    pipeline: Pipeline,
-    X: pd.DataFrame,
-    y: pd.Series,
-    cv_folds: int,
-    random_seed: int,
-) -> dict[str, np.ndarray]:
-    """Run stratified k-fold cross-validation and return per-fold scores.
-
-    Uses ``StratifiedKFold`` with shuffle enabled. The ``random_seed``
-    parameter controls the shuffle so results are reproducible.
-
-    Args:
-        pipeline: sklearn Pipeline (fitted or unfitted; cloned internally).
-        X: Feature matrix.
-        y: Labels (0/1).
-        cv_folds: Number of stratified folds.
-        random_seed: Random state for the ``StratifiedKFold`` shuffle.
-
-    Returns:
-        Dict with keys "test_roc_auc" and "test_f1", each a numpy array
-        of length cv_folds.
-
-    Raises:
-        ValueError: If any validation fold contains zero positive examples.
-    """
-    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_seed)
-    _check_positive_per_fold(y, cv)
-    results = cross_validate(
-        pipeline, X, y, cv=cv, scoring=["roc_auc", "f1"]
-    )
-    return cast(dict[str, np.ndarray], results)
 
 
 def compute_fold_diagnostics(
