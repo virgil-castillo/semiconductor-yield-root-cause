@@ -16,7 +16,7 @@ class PathsConfig:
     Attributes:
         raw_dir: Directory containing raw SECOM data files.
         interim_dir: Directory for intermediate processed artifacts.
-        processed_dir: Directory for final train/test splits.
+        splits_dir: Directory for raw train/test split artifacts.
         models_dir: Directory for serialized model artifacts.
         reports_dir: Directory for generated reports.
         figures_dir: Directory for generated figures.
@@ -24,7 +24,7 @@ class PathsConfig:
 
     raw_dir: Path
     interim_dir: Path
-    processed_dir: Path
+    splits_dir: Path
     models_dir: Path
     reports_dir: Path
     figures_dir: Path
@@ -129,7 +129,7 @@ def load_config(path: Path | str = "configs/config.yaml") -> Config:
     paths = PathsConfig(
         raw_dir=Path(raw["paths"]["raw_dir"]),
         interim_dir=Path(raw["paths"]["interim_dir"]),
-        processed_dir=Path(raw["paths"]["processed_dir"]),
+        splits_dir=Path(raw["paths"]["splits_dir"]),
         models_dir=Path(raw["paths"]["models_dir"]),
         reports_dir=Path(raw["paths"]["reports_dir"]),
         figures_dir=Path(raw["paths"]["figures_dir"]),
