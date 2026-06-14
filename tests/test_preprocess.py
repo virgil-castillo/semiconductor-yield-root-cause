@@ -9,8 +9,8 @@ from sklearn.exceptions import NotFittedError
 from yield_risk.config import RunConfig
 from yield_risk.preprocess import (
     SecomPreprocessor,
-    run_preprocessing,
     split_stratified,
+    split_train_test,
 )
 
 # ---------------------------------------------------------------------------
@@ -410,11 +410,11 @@ class TestSplitStratified:
 
 
 # ---------------------------------------------------------------------------
-# run_preprocessing — raw splits contract
+# split_train_test — raw splits contract
 # ---------------------------------------------------------------------------
 
 
-class TestRunPreprocessing:
+class TestSplitTrainTest:
     @pytest.fixture()
     def sample_df(self) -> pd.DataFrame:
         rng = np.random.default_rng(42)
@@ -452,7 +452,7 @@ class TestRunPreprocessing:
     def test_returns_two_dataframes(
         self, sample_df: pd.DataFrame, run_cfg: RunConfig
     ) -> None:
-        result = run_preprocessing(sample_df, run_cfg)
+        result = split_train_test(sample_df, run_cfg)
         assert isinstance(result, tuple)
         assert len(result) == 2
         assert isinstance(result[0], pd.DataFrame)
@@ -461,7 +461,7 @@ class TestRunPreprocessing:
     def test_output_has_label_column(
         self, sample_df: pd.DataFrame, run_cfg: RunConfig
     ) -> None:
-        train, test = run_preprocessing(sample_df, run_cfg)
+        train, test = split_train_test(sample_df, run_cfg)
         assert "label" in train.columns
         assert "label" in test.columns
         assert set(train["label"].unique()).issubset({0, 1})
@@ -470,8 +470,8 @@ class TestRunPreprocessing:
     def test_raw_splits_preserve_nans_in_sensor_columns(
         self, sample_df: pd.DataFrame, run_cfg: RunConfig
     ) -> None:
-        """Raw splits must keep NaNs intact (no imputation in run_preprocessing)."""
-        train, _ = run_preprocessing(sample_df, run_cfg)
+        """Raw splits must keep NaNs intact (no imputation in split_train_test)."""
+        train, _ = split_train_test(sample_df, run_cfg)
         # sensor_001 has NaNs in the early rows; train is those early rows
         sensor_cols = [c for c in train.columns if c.startswith("sensor_")]
         total_nans = train[sensor_cols].isnull().sum().sum()
@@ -480,8 +480,8 @@ class TestRunPreprocessing:
     def test_raw_splits_retain_all_sensor_columns(
         self, sample_df: pd.DataFrame, run_cfg: RunConfig
     ) -> None:
-        """Raw splits keep ALL sensor columns (no selection in run_preprocessing)."""
-        train, test = run_preprocessing(sample_df, run_cfg)
+        """Raw splits keep ALL sensor columns (no selection in split_train_test)."""
+        train, test = split_train_test(sample_df, run_cfg)
         original_sensors = [c for c in sample_df.columns if c.startswith("sensor_")]
         for col in original_sensors:
             assert col in train.columns
@@ -490,14 +490,14 @@ class TestRunPreprocessing:
     def test_splits_are_disjoint(
         self, sample_df: pd.DataFrame, run_cfg: RunConfig
     ) -> None:
-        train, test = run_preprocessing(sample_df, run_cfg)
+        train, test = split_train_test(sample_df, run_cfg)
         assert set(train.index).isdisjoint(set(test.index))
 
     def test_fitted_preprocessor_output_has_no_nans(
         self, sample_df: pd.DataFrame, run_cfg: RunConfig
     ) -> None:
         """After fitting SecomPreprocessor on train split, transform has no NaNs."""
-        train, _ = run_preprocessing(sample_df, run_cfg)
+        train, _ = split_train_test(sample_df, run_cfg)
         sensor_cols = [c for c in train.columns if c.startswith("sensor_")]
         X_train = train[sensor_cols]
         pp = SecomPreprocessor(
@@ -513,7 +513,7 @@ class TestRunPreprocessing:
         self, sample_df: pd.DataFrame, run_cfg: RunConfig
     ) -> None:
         """After fitting SecomPreprocessor, only selected columns remain."""
-        train, _ = run_preprocessing(sample_df, run_cfg)
+        train, _ = split_train_test(sample_df, run_cfg)
         sensor_cols = [c for c in train.columns if c.startswith("sensor_")]
         X_train = train[sensor_cols]
         pp = SecomPreprocessor(

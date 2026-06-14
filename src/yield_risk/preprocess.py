@@ -244,7 +244,7 @@ def split_stratified(
     return train, test
 
 
-def run_preprocessing(
+def split_train_test(
     df: pd.DataFrame,
     run_cfg: RunConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:

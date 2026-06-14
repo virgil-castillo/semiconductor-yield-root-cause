@@ -57,7 +57,7 @@ Google-style docstrings with Args/Returns/Raises; full annotations; `mypy
 - `yield_risk.data.load_secom`, `yield_risk.validation.validate_secom`.
 - Cleaning decisions from `yield_risk.preprocess`: `drop_high_missing`,
   `impute_median`, `drop_low_variance`, `drop_high_correlation`. Do **not** call
-  `run_preprocessing` (it materializes CSVs); apply these fold-locally so every
+  `split_train_test` (it materializes CSVs); apply these fold-locally so every
   fit statistic comes from the train fold only.
 - `yield_risk.evaluate.compute_metrics` for `roc_auc`/`pr_auc`, and its plot
   helpers for figures.
