@@ -43,7 +43,7 @@ Depends on: Tier 0
 | 1-D | Preprocessing pipeline | `src/yield_risk/preprocess.py` | ✅ |
 | 1-E | Feature engineering | `src/yield_risk/features.py` | ✅ |
 | 1-F | Stratified split | `src/yield_risk/preprocess.py` | ✅ |
-| 1-G | Dataset orchestration script | `scripts/preprocess_data.py` | ✅ |
+| 1-G | Dataset orchestration script | `scripts/split_data.py` | ✅ |
 
 **Tests:** `tests/test_data.py`, `tests/test_preprocess.py`, `tests/test_features.py`
 

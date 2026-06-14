@@ -122,7 +122,7 @@ semiconductor-yield-root-cause/
 ├── data/
 │   ├── raw/README.md                # How to obtain the SECOM dataset
 │   ├── interim/README.md            # Intermediate processed artifacts
-│   └── processed/README.md         # Final train/val/test splits
+│   └── splits/README.md             # Raw stratified train/test split CSVs
 │
 ├── notebooks/
 │   ├── 01_eda.ipynb
@@ -152,7 +152,7 @@ semiconductor-yield-root-cause/
 │
 ├── scripts/
 │   ├── download_data.py             # Fetch SECOM files from UCI
-│   ├── preprocess_data.py           # Raw → processed train/test pipeline
+│   ├── split_data.py                # Raw → stratified raw train/test splits
 │   ├── train_models.py              # Train/tune model families, select winner
 │   ├── evaluate_model.py            # Load artifact, produce eval report
 │   ├── generate_explanations.py     # SHAP values + root-cause tables
@@ -199,6 +199,27 @@ semiconductor-yield-root-cause/
 ---
 
 ## Methodology
+
+### Pipeline stages
+
+```
+raw SECOM (data/raw)
+      │  load + schema validation
+      ▼
+split_train_test  ──►  split_data.py  ──►  data/splits/{train,test}.csv
+  (stratified                              RAW rows: NaNs intact,
+   holdout)                                all sensor columns kept
+      │
+      ▼
+sklearn Pipeline (fit on train.csv only)
+  ├─ "preprocess" step (SecomPreprocessor): drop-high-missing →
+  │   median impute → drop-low-variance → drop-high-correlation
+  ├─ scaling (linear models only)
+  └─ estimator
+      │  stratified k-fold CV  →  select winner  →  freeze threshold (train OOF)
+      ▼
+final fit  ──►  evaluate once on test.csv
+```
 
 ### 1. Data acquisition and validation
 
@@ -487,7 +508,7 @@ conda activate mlops
 
 ```bash
 python scripts/download_data.py
-python scripts/preprocess_data.py
+python scripts/split_data.py
 python scripts/train_models.py
 python scripts/evaluate_model.py
 python scripts/feature_importance.py
@@ -499,7 +520,7 @@ python scripts/generate_reports.py
 
 ```bash
 python scripts/download_data.py       # Fetch raw data
-python scripts/preprocess_data.py     # Build processed train/test splits
+python scripts/split_data.py          # Write raw stratified train/test splits
 python scripts/train_models.py        # Train/tune model families, select winner
 python scripts/evaluate_model.py      # Evaluate on test set, save metrics + figures
 python scripts/feature_importance.py  # Extract selected-model feature importance
