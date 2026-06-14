@@ -52,7 +52,7 @@ def main() -> None:
             cfg.run.cv_folds,
             cfg.run.random_seed,
             cfg.run.missing_threshold,
-            cfg.run.variance_threshold,
+            cfg.run.cv_threshold,
             cfg.run.correlation_threshold,
         )
         print(

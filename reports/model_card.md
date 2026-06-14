@@ -8,24 +8,24 @@ Designed output: risk score, threshold flag, and sensor ranking for engineering 
 
 ## Model Summary
 
-- Model family: logistic regression
-- Selected threshold: 0.470
-- Expected cost at selected threshold: 132.000
-- Test PR-AUC: 0.147
-- Test ROC-AUC: 0.724
-- Test recall: 0.353
-- Test precision: 0.214
+- Model family: random forest
+- Selected threshold: 0.140
+- Expected cost at selected threshold: 83.000
+- Test PR-AUC: 0.222
+- Test ROC-AUC: 0.793
+- Test recall: 0.812
+- Test precision: 0.197
 
 ## Selection Protocol
 
-Selection is fixed before held-out evaluation: logistic regression by the highest one-sigma lower-confidence bound on training-only 5-fold cross-validation PR-AUC (`selection_score = cv_pr_auc_mean - std_penalty * cv_pr_auc_std`, with `std_penalty = 1.0`). Penalizing the CV mean by its per-fold standard deviation favors families whose performance is consistent across folds rather than driven by a single high-variance fold. Held-out test metrics measure generalization and threshold performance.
+Selection is fixed before held-out evaluation: random forest by the highest mean training-only 5-fold cross-validation PR-AUC (`cv_pr_auc_mean`). Held-out test metrics measure generalization and threshold performance.
 
 ## Confusion Matrix
 
-- True positives: 6
-- False positives: 22
-- True negatives: 274
-- False negatives: 11
+- True positives: 13
+- False positives: 53
+- True negatives: 167
+- False negatives: 3
 
 ## Monitoring Hooks
 

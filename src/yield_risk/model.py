@@ -242,7 +242,7 @@ def build_pipeline(
     name: str,
     random_seed: int,
     missing_threshold: float,
-    variance_threshold: float,
+    cv_threshold: float,
     correlation_threshold: float,
 ) -> Pipeline:
     """Build an unfitted pipeline for a registered model family.
@@ -256,8 +256,8 @@ def build_pipeline(
         random_seed: Random state passed to the estimator factory.
         missing_threshold: Passed to SecomPreprocessor — drop columns with
             missing fraction strictly above this.
-        variance_threshold: Passed to SecomPreprocessor — drop columns with
-            variance strictly below this.
+        cv_threshold: Passed to SecomPreprocessor — drop columns with
+            coefficient of variation strictly below this.
         correlation_threshold: Passed to SecomPreprocessor — drop the later of
             each pair with absolute correlation strictly above this.
 
@@ -273,7 +273,7 @@ def build_pipeline(
             "preprocess",
             SecomPreprocessor(
                 missing_threshold=missing_threshold,
-                variance_threshold=variance_threshold,
+                cv_threshold=cv_threshold,
                 correlation_threshold=correlation_threshold,
             ),
         ),
@@ -414,7 +414,7 @@ def run_search(
     cv_folds: int,
     random_seed: int,
     missing_threshold: float,
-    variance_threshold: float,
+    cv_threshold: float,
     correlation_threshold: float,
     n_jobs: int = -1,
 ) -> SearchResult:
@@ -439,7 +439,7 @@ def run_search(
         random_seed: Random state for the estimator, the StratifiedKFold
             shuffle, and RandomizedSearchCV.
         missing_threshold: Passed through to build_pipeline / SecomPreprocessor.
-        variance_threshold: Passed through to build_pipeline / SecomPreprocessor.
+        cv_threshold: Passed through to build_pipeline / SecomPreprocessor.
         correlation_threshold: Passed through to build_pipeline / SecomPreprocessor.
         n_jobs: Parallel jobs for the search (bound to the CPU allocation).
 
@@ -454,7 +454,7 @@ def run_search(
         name,
         random_seed,
         missing_threshold=missing_threshold,
-        variance_threshold=variance_threshold,
+        cv_threshold=cv_threshold,
         correlation_threshold=correlation_threshold,
     )
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_seed)

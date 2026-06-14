@@ -173,8 +173,8 @@ class TestModelFeatureNamesAlignment:
     def pipeline_with_dropped_col(self) -> tuple[Pipeline, list[str]]:
         """Fit a logistic-regression pipeline where one column is dropped.
 
-        ``sensor_const`` is all-zero (variance 0), so it is dropped by the
-        variance filter when ``variance_threshold`` is slightly above 0.
+        ``sensor_const`` is all-zero (CV 0), so it is dropped by the
+        CV filter when ``cv_threshold`` is slightly above 0.
         Returns the fitted pipeline and the full list of raw sensor column names.
         """
         rng = np.random.default_rng(0)
@@ -184,7 +184,7 @@ class TestModelFeatureNamesAlignment:
                 "sensor_a": rng.normal(0, 1, n),
                 "sensor_b": rng.normal(0, 1, n),
                 "sensor_c": rng.normal(0, 1, n),
-                "sensor_const": np.zeros(n),  # zero-variance — will be dropped
+                "sensor_const": np.zeros(n),  # CV = 0 — will be dropped
             }
         )
         y = pd.Series([0] * 70 + [1] * 10)
@@ -192,7 +192,7 @@ class TestModelFeatureNamesAlignment:
             "logistic_regression",
             random_seed=42,
             missing_threshold=1.0,
-            variance_threshold=1e-9,
+            cv_threshold=1e-9,
             correlation_threshold=1.0,
         )
         pipeline.fit(X, y)
@@ -211,7 +211,7 @@ class TestModelFeatureNamesAlignment:
     def test_dropped_column_not_in_model_feature_names(
         self, pipeline_with_dropped_col: tuple[Pipeline, list[str]]
     ) -> None:
-        """The zero-variance column must not appear in model_feature_names."""
+        """The dropped low-CV column must not appear in model_feature_names."""
         pipeline, _ = pipeline_with_dropped_col
         kept = model_feature_names(pipeline)
         assert "sensor_const" not in kept

@@ -48,7 +48,7 @@ class TestSecomPreprocessorMissingFilter:
         )
         pp = SecomPreprocessor(
             missing_threshold=0.5,
-            variance_threshold=0.0,
+            cv_threshold=0.0,
             correlation_threshold=1.0,
         )
         pp.fit(X)
@@ -63,7 +63,7 @@ class TestSecomPreprocessorMissingFilter:
         )
         pp = SecomPreprocessor(
             missing_threshold=0.5,
-            variance_threshold=0.0,
+            cv_threshold=0.0,
             correlation_threshold=1.0,
         )
         pp.fit(X)
@@ -77,7 +77,7 @@ class TestSecomPreprocessorMissingFilter:
         )
         pp = SecomPreprocessor(
             missing_threshold=0.5,
-            variance_threshold=0.0,
+            cv_threshold=0.0,
             correlation_threshold=1.0,
         )
         pp.fit(X)
@@ -87,11 +87,11 @@ class TestSecomPreprocessorMissingFilter:
 
 
 # ---------------------------------------------------------------------------
-# SecomPreprocessor — variance filter
+# SecomPreprocessor — CV filter
 # ---------------------------------------------------------------------------
 
 
-class TestSecomPreprocessorVarianceFilter:
+class TestSecomPreprocessorCvFilter:
     def test_drops_constant_column(self) -> None:
         X = _sensor_df(
             s0=[1.0, 2.0, 3.0, 4.0, 5.0],
@@ -99,7 +99,7 @@ class TestSecomPreprocessorVarianceFilter:
         )
         pp = SecomPreprocessor(
             missing_threshold=1.0,
-            variance_threshold=0.01,
+            cv_threshold=0.01,
             correlation_threshold=1.0,
         )
         pp.fit(X)
@@ -113,7 +113,7 @@ class TestSecomPreprocessorVarianceFilter:
         )
         pp = SecomPreprocessor(
             missing_threshold=1.0,
-            variance_threshold=0.01,
+            cv_threshold=0.01,
             correlation_threshold=1.0,
         )
         pp.fit(X)
@@ -132,7 +132,7 @@ class TestSecomPreprocessorCorrelationFilter:
         X = _sensor_df(s0=vals, s1=vals)
         pp = SecomPreprocessor(
             missing_threshold=1.0,
-            variance_threshold=0.0,
+            cv_threshold=0.0,
             correlation_threshold=0.9,
         )
         pp.fit(X)
@@ -147,7 +147,7 @@ class TestSecomPreprocessorCorrelationFilter:
         )
         pp = SecomPreprocessor(
             missing_threshold=1.0,
-            variance_threshold=0.0,
+            cv_threshold=0.0,
             correlation_threshold=0.9,
         )
         pp.fit(X)
@@ -157,17 +157,17 @@ class TestSecomPreprocessorCorrelationFilter:
 
 
 # ---------------------------------------------------------------------------
-# SecomPreprocessor — filter order (missing → variance → correlation)
+# SecomPreprocessor — filter order (missing → CV → correlation)
 # ---------------------------------------------------------------------------
 
 
 class TestSecomPreprocessorFilterOrder:
-    def test_missing_then_variance_then_correlation_order(self) -> None:
-        """Missing filter runs before variance so a mostly-NaN col is dropped.
+    def test_missing_then_cv_then_correlation_order(self) -> None:
+        """Missing filter runs before CV so a mostly-NaN col is dropped.
 
         s0: 80 % missing — dropped by missing filter first.
-        s1: constant — would be dropped by variance filter.
-        s2: high variance, kept.
+        s1: constant — would be dropped by the CV filter (CV = 0).
+        s2: high relative variation, kept.
         """
         X = pd.DataFrame(
             {
@@ -178,7 +178,7 @@ class TestSecomPreprocessorFilterOrder:
         )
         pp = SecomPreprocessor(
             missing_threshold=0.5,
-            variance_threshold=0.01,
+            cv_threshold=0.01,
             correlation_threshold=1.0,
         )
         pp.fit(X)
@@ -198,7 +198,7 @@ class TestSecomPreprocessorImputation:
         X_train = _sensor_df(s0=[1.0, float("nan"), 3.0])
         pp = SecomPreprocessor(
             missing_threshold=1.0,
-            variance_threshold=0.0,
+            cv_threshold=0.0,
             correlation_threshold=1.0,
         )
         pp.fit(X_train)
@@ -211,7 +211,7 @@ class TestSecomPreprocessorImputation:
         X = _sensor_df(s0=[1.0, float("nan"), 3.0], s1=[2.0, 4.0, 6.0])
         pp = SecomPreprocessor(
             missing_threshold=1.0,
-            variance_threshold=0.0,
+            cv_threshold=0.0,
             correlation_threshold=1.0,
         )
         pp.fit(X)
@@ -237,7 +237,7 @@ class TestSecomPreprocessorNoLeakage:
 
         pp = SecomPreprocessor(
             missing_threshold=1.0,
-            variance_threshold=0.0,
+            cv_threshold=0.0,
             correlation_threshold=1.0,
         )
         pp.fit(X_train)
@@ -246,7 +246,7 @@ class TestSecomPreprocessorNoLeakage:
 
     def test_transform_uses_train_selected_columns_only(self) -> None:
         """Columns kept come from fit; a column absent after fit is excluded."""
-        # s1 is constant in train → dropped by variance filter
+        # s1 is constant in train → dropped by CV filter (CV = 0)
         X_train = pd.DataFrame(
             {
                 "s0": [1.0, 2.0, 3.0, 4.0, 5.0],
@@ -262,7 +262,7 @@ class TestSecomPreprocessorNoLeakage:
         )
         pp = SecomPreprocessor(
             missing_threshold=1.0,
-            variance_threshold=0.01,
+            cv_threshold=0.01,
             correlation_threshold=1.0,
         )
         pp.fit(X_train)
@@ -281,7 +281,7 @@ class TestSecomPreprocessorGetFeatureNamesOut:
         X = _sensor_df(s0=vals, s1=vals)  # s1 duplicate → dropped
         pp = SecomPreprocessor(
             missing_threshold=1.0,
-            variance_threshold=0.0,
+            cv_threshold=0.0,
             correlation_threshold=0.9,
         )
         pp.fit(X)
@@ -291,7 +291,7 @@ class TestSecomPreprocessorGetFeatureNamesOut:
     def test_raises_not_fitted_error_before_fit(self) -> None:
         pp = SecomPreprocessor(
             missing_threshold=0.5,
-            variance_threshold=0.0,
+            cv_threshold=0.0,
             correlation_threshold=1.0,
         )
         with pytest.raises(NotFittedError):
@@ -300,7 +300,7 @@ class TestSecomPreprocessorGetFeatureNamesOut:
     def test_transform_raises_not_fitted_error_before_fit(self) -> None:
         pp = SecomPreprocessor(
             missing_threshold=0.5,
-            variance_threshold=0.0,
+            cv_threshold=0.0,
             correlation_threshold=1.0,
         )
         X = _sensor_df(s0=[1.0, 2.0, 3.0])
@@ -311,7 +311,7 @@ class TestSecomPreprocessorGetFeatureNamesOut:
         X = _sensor_df(s0=[1.0, 2.0, 3.0], s1=[4.0, 5.0, 6.0])
         pp = SecomPreprocessor(
             missing_threshold=1.0,
-            variance_threshold=0.0,
+            cv_threshold=0.0,
             correlation_threshold=1.0,
         )
         pp.fit(X)
@@ -445,7 +445,7 @@ class TestSplitTrainTest:
             test_size=0.20,
             cv_folds=5,
             missing_threshold=0.60,
-            variance_threshold=0.01,
+            cv_threshold=0.01,
             correlation_threshold=0.95,
         )
 
@@ -502,7 +502,7 @@ class TestSplitTrainTest:
         X_train = train[sensor_cols]
         pp = SecomPreprocessor(
             missing_threshold=run_cfg.missing_threshold,
-            variance_threshold=run_cfg.variance_threshold,
+            cv_threshold=run_cfg.cv_threshold,
             correlation_threshold=run_cfg.correlation_threshold,
         )
         pp.fit(X_train)
@@ -518,7 +518,7 @@ class TestSplitTrainTest:
         X_train = train[sensor_cols]
         pp = SecomPreprocessor(
             missing_threshold=run_cfg.missing_threshold,
-            variance_threshold=run_cfg.variance_threshold,
+            cv_threshold=run_cfg.cv_threshold,
             correlation_threshold=run_cfg.correlation_threshold,
         )
         pp.fit(X_train)

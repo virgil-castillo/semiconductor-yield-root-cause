@@ -316,7 +316,7 @@ def render_data_card(inputs: ReportInputs) -> str:
         f"- Sensor matrix: {data.sensor_count} raw sensor columns with overall "
         f"missing-value rate {data.sensor_missing_rate:.3f}. The train/test CSVs "
         "hold the unprocessed sensor readings (all columns, missing values "
-        "intact, no feature selection). Preprocessing — missing/variance/"
+        "intact, no feature selection). Preprocessing — missing/CV/"
         "correlation filtering plus median imputation — is fit per "
         "cross-validation fold inside the model pipeline to avoid leakage, not "
         "applied before the split.\n\n"

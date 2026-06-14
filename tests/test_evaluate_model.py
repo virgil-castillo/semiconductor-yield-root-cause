@@ -112,7 +112,7 @@ def _fit_and_dump_pipeline(
         name,
         random_seed=0,
         missing_threshold=0.9,
-        variance_threshold=0.0,
+        cv_threshold=0.0,
         correlation_threshold=0.999,
     )
     X = train[SENSOR_COLS]
@@ -220,7 +220,7 @@ def fake_config(artifact_root: Path) -> Config:
             test_size=0.2,
             cv_folds=3,
             missing_threshold=0.9,
-            variance_threshold=0.0,
+            cv_threshold=0.0,
             correlation_threshold=0.999,
         ),
     )

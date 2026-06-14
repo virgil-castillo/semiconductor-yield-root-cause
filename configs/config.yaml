@@ -10,6 +10,6 @@ run:
   random_seed: 42
   test_size: 0.15
   cv_folds: 5
-  missing_threshold: 0.60    # drop features with > 60% missing values
-  variance_threshold: 0.01   # drop near-constant features below this variance
+  missing_threshold: 0.10    # drop features missing in > 10% of training rows
+  cv_threshold: 0.01         # drop features with coefficient of variation < this
   correlation_threshold: 0.95  # drop one of each pair with |r| > threshold

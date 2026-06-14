@@ -39,7 +39,8 @@ class RunConfig:
         test_size: Fraction of data held out for final evaluation.
         cv_folds: Number of stratified CV folds.
         missing_threshold: Drop features with missing rate above this value.
-        variance_threshold: Drop features with variance below this value.
+        cv_threshold: Drop features with coefficient of variation below this
+            value (scale-adjusted variability; see EDA notebook 01).
         correlation_threshold: Drop one of each pair with |r| above this value.
     """
 
@@ -47,7 +48,7 @@ class RunConfig:
     test_size: float
     cv_folds: int
     missing_threshold: float
-    variance_threshold: float
+    cv_threshold: float
     correlation_threshold: float
 
 

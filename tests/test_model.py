@@ -26,11 +26,11 @@ from yield_risk.thresholding import find_optimal_threshold
 
 # Small thresholds that preserve all 5 synthetic columns:
 #  missing=0.6 → none dropped (no NaNs at all)
-#  variance=0.0 → none dropped (all columns have positive variance)
+#  cv=0.0 → none dropped (CV is never strictly below 0)
 #  correlation=0.99 → none dropped (random data has low correlation)
 _THRESH = dict(
     missing_threshold=0.6,
-    variance_threshold=0.0,
+    cv_threshold=0.0,
     correlation_threshold=0.99,
 )
 
@@ -473,7 +473,7 @@ class TestRawNaNPredictProba:
             "logistic_regression",
             random_seed=0,
             missing_threshold=0.6,
-            variance_threshold=0.0,
+            cv_threshold=0.0,
             correlation_threshold=0.99,
         )
         pipeline.fit(X_train, y_train)
@@ -571,7 +571,7 @@ class TestPerFoldRefit:
         cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
         pp_kwargs = dict(
             missing_threshold=0.6,
-            variance_threshold=0.0,
+            cv_threshold=0.0,
             correlation_threshold=0.99,
         )
 

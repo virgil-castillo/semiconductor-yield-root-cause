@@ -54,18 +54,33 @@ def _impute_with_medians(
     return df.fillna(medians)
 
 
-def _drop_low_variance(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
-    """Drop columns whose variance is strictly below threshold.
+def _drop_low_cv(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    """Drop columns whose coefficient of variation is strictly below threshold.
+
+    The coefficient of variation (CV) is ``std / |mean|``, a scale-adjusted
+    measure of variability. Unlike raw variance, it does not penalise a sensor
+    merely for operating on a small absolute scale, so low-scale sensors that
+    still move relative to their mean are retained. Two boundary cases are
+    defined explicitly to match the EDA decision record (notebook 01):
+
+    - mean == 0 and std == 0 (a flat sensor): CV is defined as 0.0, so the
+      sensor is dropped.
+    - mean == 0 and std > 0 (oscillates about zero): CV is defined as +inf, so
+      the sensor is kept.
 
     Args:
-        df: Sensor-only DataFrame.
-        threshold: Columns with variance strictly below this are removed.
+        df: Sensor-only DataFrame with no missing values (imputed upstream).
+        threshold: Columns with CV strictly below this are removed.
 
     Returns:
-        DataFrame with low-variance columns removed.
+        DataFrame with low-CV columns removed.
     """
-    variances = df.var()
-    to_drop = [str(c) for c in variances[variances < threshold].index]
+    abs_mean = df.mean().abs()
+    std = df.std()
+    cv = (std / abs_mean.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+    cv[(abs_mean == 0) & (std == 0)] = 0.0
+    cv[(abs_mean == 0) & (std > 0)] = np.inf
+    to_drop = [str(c) for c in cv[cv < threshold].index]
     return df.drop(columns=to_drop)
 
 
@@ -90,12 +105,13 @@ def _drop_high_correlation(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
 class SecomPreprocessor(BaseEstimator, TransformerMixin):  # type: ignore[misc]
     """sklearn-compatible transformer that learns feature selection and medians.
 
-    Applies, in order: missing-rate filter, median imputation, variance filter,
+    Applies, in order: missing-rate filter, median imputation, CV filter,
     correlation filter.  All statistics are learned from the training data only.
 
     Args:
         missing_threshold: Drop columns with missing fraction strictly above this.
-        variance_threshold: Drop columns with variance strictly below this.
+        cv_threshold: Drop columns with coefficient of variation strictly below
+            this.
         correlation_threshold: Drop the later of each pair with |r| strictly
             above this value.
     """
@@ -103,19 +119,19 @@ class SecomPreprocessor(BaseEstimator, TransformerMixin):  # type: ignore[misc]
     def __init__(
         self,
         missing_threshold: float,
-        variance_threshold: float,
+        cv_threshold: float,
         correlation_threshold: float,
     ) -> None:
         """Store hyperparameters verbatim (sklearn convention — no mutation here).
 
         Args:
             missing_threshold: Missing-rate upper bound for kept columns.
-            variance_threshold: Variance lower bound for kept columns.
+            cv_threshold: Coefficient-of-variation lower bound for kept columns.
             correlation_threshold: Absolute-correlation upper bound between
                 any two kept columns.
         """
         self.missing_threshold = missing_threshold
-        self.variance_threshold = variance_threshold
+        self.cv_threshold = cv_threshold
         self.correlation_threshold = correlation_threshold
 
     def fit(
@@ -128,7 +144,7 @@ class SecomPreprocessor(BaseEstimator, TransformerMixin):  # type: ignore[misc]
         Pipeline order:
         1. Missing-rate filter (strictly above missing_threshold → dropped).
         2. Per-column median computation and internal imputation.
-        3. Variance filter (strictly below variance_threshold → dropped).
+        3. CV filter (strictly below cv_threshold → dropped).
         4. Correlation filter (later column of pair with |r| > correlation_threshold
            → dropped).
 
@@ -146,12 +162,12 @@ class SecomPreprocessor(BaseEstimator, TransformerMixin):  # type: ignore[misc]
         train_medians: pd.Series = after_missing.median()
         after_imputed = _impute_with_medians(after_missing, train_medians)
 
-        # Step 3: variance filter (on imputed data)
-        after_variance = _drop_low_variance(after_imputed, self.variance_threshold)
+        # Step 3: CV filter (on imputed data)
+        after_cv = _drop_low_cv(after_imputed, self.cv_threshold)
 
         # Step 4: correlation filter
         after_correlation = _drop_high_correlation(
-            after_variance, self.correlation_threshold
+            after_cv, self.correlation_threshold
         )
 
         # Store fitted attributes

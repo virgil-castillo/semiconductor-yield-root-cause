@@ -213,7 +213,7 @@ split_train_test  ──►  split_data.py  ──►  data/splits/{train,test}.
       ▼
 sklearn Pipeline (fit on train.csv only)
   ├─ "preprocess" step (SecomPreprocessor): drop-high-missing →
-  │   median impute → drop-low-variance → drop-high-correlation
+  │   median impute → drop-low-CV → drop-high-correlation
   ├─ scaling (linear models only)
   └─ estimator
       │  stratified k-fold CV  →  select winner  →  freeze threshold (train OOF)
@@ -242,8 +242,8 @@ The preprocessing pipeline is implemented as a scikit-learn `Pipeline` +
 `ColumnTransformer` so that all fitting is done exclusively on training data.
 Steps include:
 
-- Drop features with missingness above a configurable threshold (default 60%)
-- Drop near-constant features (variance below threshold)
+- Drop features with missingness above a configurable threshold (default 10%)
+- Drop low-variation features (coefficient of variation below threshold)
 - Add binary missingness-indicator columns for features where missingness may
   carry signal
 - Median imputation for remaining missing values

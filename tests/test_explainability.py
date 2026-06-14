@@ -275,7 +275,7 @@ class TestPreprocessPipelineFeatureNames:
         """Return a fitted pipeline, background df, and explain df.
 
         sensor_000, sensor_001, sensor_002 are normal random features.
-        sensor_constant is all-zeros — zero variance, dropped by SecomPreprocessor.
+        sensor_constant is all-zeros — CV = 0, dropped by SecomPreprocessor.
         """
         rng = np.random.default_rng(42)
         n_train = 60
@@ -285,7 +285,7 @@ class TestPreprocessPipelineFeatureNames:
                 "sensor_000": rng.normal(size=n_train),
                 "sensor_001": rng.normal(size=n_train),
                 "sensor_002": rng.normal(size=n_train),
-                "sensor_constant": np.zeros(n_train),  # zero variance — dropped
+                "sensor_constant": np.zeros(n_train),  # CV = 0 — dropped
             }
         )
         y_train = pd.Series([0] * 52 + [1] * 8)
@@ -307,14 +307,14 @@ class TestPreprocessPipelineFeatureNames:
             }
         )
 
-        # variance_threshold=0.01: sensor_constant (var=0) is below this → dropped
+        # cv_threshold=0.01: sensor_constant (CV=0) is below this → dropped
         pipeline = Pipeline(
             [
                 (
                     "preprocess",
                     SecomPreprocessor(
                         missing_threshold=1.0,
-                        variance_threshold=0.01,
+                        cv_threshold=0.01,
                         correlation_threshold=1.0,
                     ),
                 ),

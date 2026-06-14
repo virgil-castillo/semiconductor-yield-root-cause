@@ -55,7 +55,7 @@ def _make_pipeline() -> Pipeline:
                 "preprocess",
                 SecomPreprocessor(
                     missing_threshold=0.9,
-                    variance_threshold=0.0,
+                    cv_threshold=0.0,
                     correlation_threshold=0.999,
                 ),
             ),
