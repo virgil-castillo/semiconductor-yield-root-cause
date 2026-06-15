@@ -22,6 +22,7 @@ from yield_risk.model import (
     run_search,
     select_best,
 )
+from yield_risk.monitoring import build_reference_profile, save_reference_profile
 
 
 def main() -> None:
@@ -113,6 +114,15 @@ def main() -> None:
     )
     print(f"Saved threshold to {threshold_path}")
     print(f"Saved selected model to {cfg.paths.models_dir / 'selected_model.joblib'}")
+
+    # Snapshot the reference distribution for the monitoring notebook so it never
+    # reloads raw training data at runtime.
+    reference_profile = build_reference_profile(
+        train, sensor_cols, winning.estimator, threshold_map[winner]
+    )
+    reference_path = cfg.paths.models_dir / "reference_profile.joblib"
+    save_reference_profile(reference_profile, reference_path)
+    print(f"Saved reference profile to {reference_path}")
 
 
 if __name__ == "__main__":
