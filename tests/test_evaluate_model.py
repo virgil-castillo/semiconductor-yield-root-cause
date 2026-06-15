@@ -23,7 +23,7 @@ import pytest
 
 matplotlib.use("Agg")
 
-import evaluate_model  # noqa: E402  (scripts/ dir added by conftest)
+import evaluate_model  # noqa: E402  (scripts/ on pythonpath via pyproject)
 
 from yield_risk.config import (  # noqa: E402
     Config,

@@ -94,3 +94,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Make the CLI entry points in scripts/ importable by name (e.g. `import
+# batch_score`) via pytest's supported pythonpath mechanism, instead of
+# mutating sys.path at import time in a conftest.
+pythonpath = ["scripts"]
