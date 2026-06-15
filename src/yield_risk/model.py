@@ -208,12 +208,45 @@ def _build_random_forest(random_seed: int) -> BaseEstimator:
     )
 
 
+class _BalancedXGBClassifier(XGBClassifier):
+    """XGBoost classifier that derives ``scale_pos_weight`` at fit time.
+
+    The positive-class weight is computed from the labels passed to
+    :meth:`fit` rather than once on the full training set before
+    cross-validation. This keeps each CV fold's class-ratio parameter a
+    function of that fold's training labels only, so validation-fold labels
+    never leak into model selection.
+    """
+
+    def fit(
+        self, X: pd.DataFrame, y: pd.Series, **kwargs: object
+    ) -> _BalancedXGBClassifier:
+        """Set ``scale_pos_weight`` from *y*'s class ratio, then fit.
+
+        Args:
+            X: Training feature matrix.
+            y: Training labels (0/1).
+            **kwargs: Forwarded to :meth:`xgboost.XGBClassifier.fit`.
+
+        Returns:
+            The fitted estimator.
+        """
+        y_arr = np.asarray(y)
+        n_pos = int((y_arr == 1).sum())
+        n_neg = int((y_arr == 0).sum())
+        self.scale_pos_weight = (n_neg / n_pos) if n_pos else 1.0
+        super().fit(X, y, **kwargs)
+        return self
+
+
 def _build_xgboost(random_seed: int) -> BaseEstimator:
     """Build a histogram-based XGBoost classifier (single-threaded estimator).
 
-    scale_pos_weight is set from the class ratio at search time, not here.
+    Uses :class:`_BalancedXGBClassifier`, which derives ``scale_pos_weight``
+    from each fold's own training labels at fit time, avoiding the
+    validation-label leak that arises from setting it once before CV.
     """
-    return XGBClassifier(
+    return _BalancedXGBClassifier(
         eval_metric="logloss",
         tree_method="hist",
         random_state=random_seed,
@@ -428,7 +461,9 @@ def run_search(
     capped at the size of the discrete grid so small grids do not raise. The
     dummy family has no grid: it is fit directly and scored with
     ``cross_val_score`` so it still appears as the chance floor. For XGBoost,
-    ``scale_pos_weight`` is set from the training class ratio before searching.
+    ``scale_pos_weight`` is derived per fold from that fold's own training
+    labels at fit time (see :class:`_BalancedXGBClassifier`), so no
+    validation-fold labels enter the class-ratio parameter.
 
     Args:
         name: Registered family identifier.
@@ -459,12 +494,6 @@ def run_search(
     )
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_seed)
     _check_positive_per_fold(y, cv)
-
-    if name == "xgboost":
-        n_pos = int((y == 1).sum())
-        n_neg = int((y == 0).sum())
-        scale = (n_neg / n_pos) if n_pos else 1.0
-        pipeline.set_params(classifier__scale_pos_weight=scale)
 
     if not spec.tunable:
         scores = cross_val_score(pipeline, X, y, cv=cv, scoring="average_precision")

@@ -34,7 +34,7 @@
   },
   {
     "model": "xgboost",
-    "cv_pr_auc_mean": 0.19775145533447086,
+    "cv_pr_auc_mean": 0.2061849470841016,
     "test_pr_auc": 0.21326243308848797,
     "test_roc_auc": 0.7857954545454545,
     "test_recall": 0.625,
