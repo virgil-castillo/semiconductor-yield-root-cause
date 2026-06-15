@@ -11,8 +11,8 @@ selection, sensor ranking, batch scoring, and monitoring/reporting checks.
 
 1. [Business problem](#business-problem)
 2. [Why yield prediction matters](#why-yield-prediction-matters)
-3. [Dataset](#dataset)
-4. [Repository structure](#repository-structure)
+3. [Key results](#key-results)
+4. [Dataset](#dataset)
 5. [Methodology](#methodology)
 6. [Modeling approach](#modeling-approach)
 7. [Root-cause sensor ranking](#root-cause-sensor-ranking)
@@ -20,7 +20,7 @@ selection, sensor ranking, batch scoring, and monitoring/reporting checks.
 9. [Dashboard](#dashboard)
 10. [API](#api)
 11. [Reproducing the project](#reproducing-the-project)
-12. [Key results](#key-results)
+12. [Repository structure](#repository-structure)
 13. [Limitations](#limitations)
 14. [Future work](#future-work)
 
@@ -66,6 +66,39 @@ material.
 
 ---
 
+## Key results
+
+Model selection is based on training-only 5-fold CV PR-AUC. The held-out test
+set is used once for final comparison and cost-threshold evaluation.
+
+| Model | CV PR-AUC | Test PR-AUC | Test ROC-AUC | Recall (fail) | Precision | Opt. threshold | Cost |
+|-------|-----------|-------------|--------------|---------------|-----------|----------------|------|
+| Dummy (stratified) | 0.066 | 0.068 | 0.504 | 0.063 | 0.077 | 0.01 | 162 |
+| Logistic Regression | 0.180 | 0.168 | 0.726 | 0.313 | 0.143 | 0.52 | 140 |
+| Random Forest | **0.227** | **0.222** | **0.793** | **0.812** | **0.197** | 0.14 | **83** |
+| XGBoost | 0.206 | 0.213 | 0.786 | 0.625 | 0.156 | 0.02 | 114 |
+
+**Selected model:** random forest, chosen by the training-only CV protocol. It
+also leads on the held-out test set (PR-AUC 0.222 vs XGBoost 0.213), so the
+family fixed on cross-validation is confirmed by the single test-set look;
+XGBoost is the closest challenger.
+
+**Selected-model root-cause candidates:** `sensor_059`, `sensor_033`,
+`sensor_103`, `sensor_031`, `sensor_129` from
+`reports/root_cause_candidates.csv`.
+
+`sensor_059` is the first sensor to inspect. It leads the selected model's
+candidate ranking and remains first in the XGBoost sensitivity check.
+
+**XGBoost sensitivity check:** the challenger XGBoost model also ranks
+`sensor_059` first. Its top-five candidates overlap the selected random forest
+on three sensors (`sensor_059`, `sensor_033`, `sensor_103`), with
+a top-ten overlap of 7/10. The reporting pipeline does not persist a
+cross-model sensitivity artifact; the comparison is computed for display in
+`notebooks/04_2_xgboost_root_cause_sensitivity.ipynb`.
+
+---
+
 ## Dataset
 
 **Source:** [UCI Machine Learning Repository — SECOM Dataset](https://archive.ics.uci.edu/ml/datasets/SECOM)
@@ -86,113 +119,6 @@ physical process names are not provided in the public release.
 The dataset is available for download from the UCI repository. Raw data files are
 not committed to this repository. See [`data/raw/README.md`](data/raw/README.md)
 for acquisition instructions.
-
----
-
-## Repository structure
-
-The tree below is the target production-style structure. In the current repo,
-the implemented pieces are the data pipeline, multi-family model selection,
-cost-sensitive evaluation, feature importance, SHAP/root-cause ranking, batch
-scoring, lightweight monitoring/reporting, the notebook analyses through
-root-cause sensitivity, and the prediction API. Dashboard, Makefile, Docker, and CI remain planned work.
-
-```
-semiconductor-yield-root-cause/
-│
-├── README.md                        # This file
-├── ROADMAP.md → docs/ROADMAP.md
-├── pyproject.toml                   # Package metadata, deps, tool config
-├── requirements.txt                 # Pinned runtime deps for reproducibility
-├── Makefile                         # Top-level task runner
-├── Dockerfile                       # Container for Streamlit app or API
-├── .dockerignore
-├── .gitignore
-├── LICENSE
-│
-├── .github/
-│   └── workflows/
-│       └── ci.yml                   # Lint → test → smoke on every push
-│
-├── configs/
-│   ├── config.yaml                  # Paths, seeds, run-level settings
-│   ├── model_config.yaml            # Model hyperparameters and search grids
-│   └── cost_config.yaml             # False-pass / false-fail cost assumptions
-│
-├── data/
-│   ├── raw/README.md                # How to obtain the SECOM dataset
-│   ├── interim/README.md            # Intermediate processed artifacts
-│   └── splits/README.md             # Raw stratified train/test split CSVs
-│
-├── notebooks/
-│   ├── 01_eda.ipynb
-│   ├── 02_sensor_shortlist.ipynb
-│   ├── 03_model_training_evaluation.ipynb
-│   ├── 04_root_cause_analysis.ipynb
-│   ├── 04_2_xgboost_root_cause_sensitivity.ipynb
-│   └── 06_cost_sensitive_thresholding.ipynb  # Planned
-│
-├── src/yield_risk/                  # Core library — importable package
-│   ├── __init__.py
-│   ├── config.py                    # Config loader (YAML → dataclass)
-│   ├── data.py                      # SECOM loader, label join, renaming
-│   ├── validation.py                # Schema and data-quality checks
-│   ├── preprocess.py                # Imputation, filtering, split pipeline
-│   ├── features.py                  # Aggregate features and interactions
-│   ├── model.py                     # Model registry, CV search, selection
-│   ├── evaluate.py                  # Metrics, confusion matrix, PR/ROC curves
-│   ├── importance.py                # Family-agnostic feature importance
-│   ├── thresholding.py              # Cost-sensitive threshold search
-│   ├── explainability.py            # SHAP global + local explanations
-│   ├── root_cause.py                # Candidate ranking, SPC checks, distributions
-│   ├── monitoring.py                # Drift checks across data batches
-│   └── reporting.py                 # Markdown report generation
-│
-├── scripts/
-│   ├── download_data.py             # Fetch SECOM files from UCI
-│   ├── split_data.py                # Raw → stratified raw train/test splits
-│   ├── train_models.py              # Train/tune model families, select winner
-│   ├── evaluate_model.py            # Load artifact, produce eval report
-│   ├── generate_explanations.py     # SHAP values + root-cause tables
-│   ├── feature_importance.py        # Feature importance export
-│   ├── batch_score.py               # Score a new batch of wafer records
-│   └── generate_reports.py          # Generate markdown reports
-│
-├── app/
-│   ├── streamlit_app.py             # Planned
-│   └── pages/
-│       ├── 1_Batch_Scoring.py       # Upload → score → export
-│       ├── 2_Root_Cause_Ranking.py  # SHAP plots, feature distributions
-│       ├── 3_Cost_Thresholding.py   # Threshold slider, cost curve
-│       └── 4_Model_Monitoring.py    # Drift summary, prediction trend
-│
-├── api/
-│   ├── main.py                      # FastAPI app, lifespan, predict endpoints
-│   └── schemas.py                   # Pydantic v2 request/response schemas
-│
-├── models/
-│   └── README.md                    # Artifact naming conventions
-│
-├── reports/
-│   ├── figures/                     # Generated plots (gitignored)
-│   ├── executive_summary.md
-│   ├── model_card.md
-│   ├── data_card.md
-│   └── root_cause_report.md
-│
-├── tests/
-│   ├── test_data.py
-│   ├── test_preprocessing.py
-│   ├── test_features.py
-│   ├── test_modeling.py
-│   ├── test_thresholding.py
-│   └── test_api.py
-│
-└── docs/
-    ├── ROADMAP.md
-    ├── manufacturing_context.md
-    └── assumptions_and_limitations.md
-```
 
 ---
 
@@ -406,7 +332,7 @@ uvicorn api.main:app --host 0.0.0.0 --port 8000
   "status": "ok",
   "model_loaded": true,
   "model_version": "random_forest-a1b2c3d",
-  "threshold": 0.08
+  "threshold": 0.14
 }
 ```
 
@@ -428,7 +354,7 @@ uvicorn api.main:app --host 0.0.0.0 --port 8000
   "wafer_id": "W-00123",
   "failure_probability": 0.71,
   "risk_flag": true,
-  "threshold_used": 0.08,
+  "threshold_used": 0.14,
   "model_version": "random_forest-a1b2c3d"
 }
 ```
@@ -462,7 +388,7 @@ curl -X POST http://localhost:8000/predict \
       "wafer_id": "W-1",
       "failure_probability": 0.12,
       "risk_flag": false,
-      "threshold_used": 0.08,
+      "threshold_used": 0.14,
       "model_version": "random_forest-a1b2c3d"
     }
   ]
@@ -493,99 +419,69 @@ Request and response schemas are defined in `api/schemas.py`.
 
 ## Reproducing the project
 
-### Prerequisites
-
-- Conda with an `mlops` environment (Python 3.12)
-- See `pyproject.toml` for full dependency list
-
 ### Setup
 
-```powershell
-. "$env:USERPROFILE\miniconda3\shell\condabin\conda-hook.ps1"
+```bash
+git clone https://github.com/virgil-castillo/semiconductor-yield-root-cause.git
+cd semiconductor-yield-root-cause
+conda env create -f environment.yml
 conda activate mlops
 ```
 
-### Full pipeline
+### Run the pipeline
+
+Run the scripts in order; each step consumes the previous step's artifacts:
 
 ```bash
-python scripts/download_data.py
-python scripts/split_data.py
-python scripts/train_models.py
-python scripts/evaluate_model.py
-python scripts/feature_importance.py
-python scripts/generate_explanations.py
-python scripts/generate_reports.py
-```
-
-### Individual scripts
-
-```bash
-python scripts/download_data.py       # Fetch raw data
-python scripts/split_data.py          # Write raw stratified train/test splits
-python scripts/train_models.py        # Train/tune model families, select winner
-python scripts/evaluate_model.py      # Evaluate on test set, save metrics + figures
-python scripts/feature_importance.py  # Extract selected-model feature importance
-python scripts/generate_explanations.py  # Generate SHAP/root-cause artifacts
-python scripts/generate_reports.py    # Generate markdown reports
+python scripts/download_data.py          # Fetch raw SECOM files from UCI
+python scripts/split_data.py             # Write raw stratified train/test splits
+python scripts/train_models.py           # Train/tune model families, select winner
+python scripts/evaluate_model.py         # Evaluate on the held-out test set
+python scripts/feature_importance.py     # Selected-model feature importance
+python scripts/generate_explanations.py  # SHAP values + root-cause tables
+python scripts/generate_reports.py       # Markdown reports
 ```
 
 ### Tests
 
 ```bash
-pytest           # Full test suite
+pytest                          # Full test suite
 pytest tests/test_data.py -v    # Single module
 ```
-
-### Dashboard
-
-Not yet implemented.
 
 ### API
 
 ```bash
-python scripts/export_model_metadata.py          # Persist threshold + model version metadata
+python scripts/export_model_metadata.py          # Persist threshold + version metadata
 uvicorn api.main:app --host 0.0.0.0 --port 8000  # Serve the prediction API
 ```
 
 See [API](#api) for the full endpoint contract, request/response examples, and
 error codes.
 
-### Docker
-
-Not yet implemented.
-
 ---
 
-## Key results
+## Repository structure
 
-Model selection is based on training-only 5-fold CV PR-AUC. The held-out test
-set is used once for final comparison and cost-threshold evaluation.
+```
+semiconductor-yield-root-cause/
+├── src/yield_risk/   # Core importable library: loaders, preprocessing,
+│                     #   models, evaluation, importance, explainability,
+│                     #   thresholding, root cause, monitoring, reporting
+├── scripts/          # CLI entry points; sole writers of artifacts
+│                     #   (download → split → train → evaluate → explain → report)
+├── notebooks/        # Read-only analyses (EDA → sensor shortlist →
+│                     #   modeling → root cause → XGBoost sensitivity)
+├── api/              # FastAPI scoring service (endpoints + Pydantic schemas)
+├── configs/          # YAML run, model, and cost configuration
+├── reports/          # Generated metrics, markdown reports, figures
+├── tests/            # Test suite (pytest)
+├── data/             # Dataset acquisition + split instructions (raw not committed)
+└── docs/             # Roadmap, manufacturing context, assumptions & limitations
+```
 
-| Model | CV PR-AUC | Test PR-AUC | Test ROC-AUC | Recall (fail) | Precision | Opt. threshold | Cost |
-|-------|-----------|-------------|--------------|---------------|-----------|----------------|------|
-| Dummy (stratified) | 0.066 | 0.068 | 0.504 | 0.063 | 0.077 | 0.01 | 162 |
-| Logistic Regression | 0.180 | 0.168 | 0.726 | 0.313 | 0.143 | 0.52 | 140 |
-| Random Forest | **0.227** | **0.222** | **0.793** | **0.812** | **0.197** | 0.14 | **83** |
-| XGBoost | 0.206 | 0.213 | 0.786 | 0.625 | 0.156 | 0.02 | 114 |
-
-**Selected model:** random forest, chosen by the training-only CV protocol. It
-also leads on the held-out test set (PR-AUC 0.222 vs XGBoost 0.213), so the
-family fixed on cross-validation is confirmed by the single test-set look;
-XGBoost is the closest challenger.
-
-**Selected-model root-cause candidates:** `sensor_059`, `sensor_033`,
-`sensor_103`, `sensor_031`, `sensor_129` from
-`reports/root_cause_candidates.csv`.
-
-`sensor_059` is the first sensor to inspect. It leads the selected model's
-candidate ranking and remains first in the XGBoost sensitivity check.
-
-**XGBoost sensitivity check:** the challenger XGBoost model also ranks
-`sensor_059` first. Its top-five candidates overlap the selected random forest
-on three sensors (`sensor_059`, `sensor_033`, `sensor_103`), with
-a top-ten overlap of 7/10. The reporting pipeline does not persist a
-cross-model sensitivity artifact; the comparison is computed for display in
-`notebooks/04_2_xgboost_root_cause_sensitivity.ipynb`.
+Planned work — the Streamlit dashboard, Docker packaging, and CI — is tracked in
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ---
 
