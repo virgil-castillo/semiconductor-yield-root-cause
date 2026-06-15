@@ -3,12 +3,24 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Protocol, cast
 
 import joblib
 import numpy as np
 import pandas as pd
 from scipy.stats import ks_2samp
+
+
+class _ProbabilityEstimator(Protocol):
+    def predict_proba(self, features: pd.DataFrame) -> np.ndarray:
+        """Return class probabilities for feature rows.
+
+        Args:
+            features: Feature matrix to score.
+
+        Returns:
+            Probability array with one column per class.
+        """
 
 
 @dataclass
@@ -552,7 +564,7 @@ class ReferenceProfile:
 def build_reference_profile(
     train: pd.DataFrame,
     sensor_cols: list[str],
-    model: Any,
+    model: _ProbabilityEstimator,
     high_risk_threshold: float,
 ) -> ReferenceProfile:
     """Build a reference profile from the training set.
