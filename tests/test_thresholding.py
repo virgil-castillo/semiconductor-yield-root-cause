@@ -78,6 +78,16 @@ class TestFindOptimalThreshold:
         result = find_optimal_threshold(_Y_TRUE, _Y_PROB_PERFECT, _COST, _SEARCH)
         assert result.expected_cost == pytest.approx(0.0)
 
+    def test_finds_optimum_between_grid_points(self) -> None:
+        # The cost-optimal band (0.500, 0.501] is narrower than the 0.01 grid
+        # spacing, so a uniform sweep would skip it. The midpoint optimiser
+        # must still separate the two classes at zero cost.
+        y_true = np.array([0, 1], dtype=int)
+        y_prob = np.array([0.500, 0.501])
+        result = find_optimal_threshold(y_true, y_prob, _COST, _SEARCH)
+        assert result.expected_cost == pytest.approx(0.0)
+        assert 0.500 < result.threshold < 0.501
+
     def test_high_fn_cost_prefers_low_threshold(self) -> None:
         # With false_pass=100 >> false_fail=1, optimizer must catch all failures
         # → optimal threshold should be below 0.5 to flag borderline cases
