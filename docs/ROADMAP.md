@@ -135,7 +135,7 @@ Depends on: Tier 1 (notebooks 01–02), Tier 2 (03), Tier 3 (04–06), Tier 4 (0
 | 7-E | Root-cause analysis | `notebooks/04_root_cause_analysis.ipynb` | ✅ |
 | 7-E.2 | XGBoost sensitivity check — confirm top sensors hold under the near-tie challenger | `notebooks/04_2_xgboost_root_cause_sensitivity.ipynb` | ✅ |
 | 7-F | Cost-sensitive thresholding | `notebooks/06_cost_sensitive_thresholding.ipynb` | ⬜ |
-| 7-G | Model monitoring + drift checks | `notebooks/07_model_monitoring_drift_checks.ipynb` | ✅ |
+| 7-G | Model monitoring + drift checks | `src/yield_risk/monitoring.py`, `scripts/generate_reports.py` | ✅ |
 
 ---
 

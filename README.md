@@ -94,8 +94,8 @@ for acquisition instructions.
 The tree below is the target production-style structure. In the current repo,
 the implemented pieces are the data pipeline, multi-family model selection,
 cost-sensitive evaluation, feature importance, SHAP/root-cause ranking, batch
-scoring, lightweight monitoring/reporting, and notebooks through monitoring
-drift checks, and the prediction API. Dashboard, Makefile, Docker, and CI remain planned work.
+scoring, lightweight monitoring/reporting, the notebook analyses through
+root-cause sensitivity, and the prediction API. Dashboard, Makefile, Docker, and CI remain planned work.
 
 ```
 semiconductor-yield-root-cause/
@@ -130,8 +130,7 @@ semiconductor-yield-root-cause/
 │   ├── 03_model_training_evaluation.ipynb
 │   ├── 04_root_cause_analysis.ipynb
 │   ├── 04_2_xgboost_root_cause_sensitivity.ipynb
-│   ├── 06_cost_sensitive_thresholding.ipynb  # Planned
-│   └── 07_model_monitoring_drift_checks.ipynb
+│   └── 06_cost_sensitive_thresholding.ipynb  # Planned
 │
 ├── src/yield_risk/                  # Core library — importable package
 │   ├── __init__.py
@@ -251,7 +250,7 @@ Steps include:
 
 ### 4. Train/test split
 
-A single stratified 80/20 train/test split is performed before any model fitting.
+A single stratified 85/15 train/test split is performed before any model fitting.
 Class weights and SMOTE are evaluated during cross-validation on the training fold
 only. The held-out test set is touched exactly once for final evaluation.
 
@@ -278,7 +277,7 @@ Four model families are trained and compared:
 | Dummy classifier (stratified) | Baseline — establishes floor for all metrics |
 | Logistic regression (L2) | Linear baseline; interpretable coefficients |
 | Random forest | Non-linear ensemble; built-in feature importance |
-| XGBoost / LightGBM | Gradient boosting; best expected performance on tabular data |
+| XGBoost | Gradient boosting; best expected performance on tabular data |
 
 All non-dummy models use stratified 5-fold cross-validation on the training set
 with class-imbalance handling (class weights or SMOTE evaluated per fold).
@@ -566,7 +565,7 @@ set is used once for final comparison and cost-threshold evaluation.
 |-------|-----------|-------------|--------------|---------------|-----------|----------------|------|
 | Dummy (stratified) | 0.066 | 0.068 | 0.504 | 0.063 | 0.077 | 0.01 | 162 |
 | Logistic Regression | 0.180 | 0.168 | 0.726 | 0.313 | 0.143 | 0.52 | 140 |
-| Random Forest | **0.227** | **0.222** | **0.793** | **0.813** | **0.197** | 0.14 | **83** |
+| Random Forest | **0.227** | **0.222** | **0.793** | **0.812** | **0.197** | 0.14 | **83** |
 | XGBoost | 0.206 | 0.213 | 0.786 | 0.625 | 0.156 | 0.02 | 114 |
 
 **Selected model:** random forest, chosen by the training-only CV protocol. It
@@ -575,7 +574,7 @@ family fixed on cross-validation is confirmed by the single test-set look;
 XGBoost is the closest challenger.
 
 **Selected-model root-cause candidates:** `sensor_059`, `sensor_033`,
-`sensor_103`, `sensor_031`, `sensor_021` from
+`sensor_103`, `sensor_031`, `sensor_129` from
 `reports/root_cause_candidates.csv`.
 
 `sensor_059` is the first sensor to inspect. It leads the selected model's
@@ -583,8 +582,8 @@ candidate ranking and remains first in the XGBoost sensitivity check.
 
 **XGBoost sensitivity check:** the challenger XGBoost model also ranks
 `sensor_059` first. Its top-five candidates overlap the selected random forest
-on four sensors (`sensor_059`, `sensor_033`, `sensor_103`, `sensor_021`), with
-a looser top-ten overlap of 4/10. The reporting pipeline does not persist a
+on three sensors (`sensor_059`, `sensor_033`, `sensor_103`), with
+a top-ten overlap of 7/10. The reporting pipeline does not persist a
 cross-model sensitivity artifact; the comparison is computed for display in
 `notebooks/04_2_xgboost_root_cause_sensitivity.ipynb`.
 
