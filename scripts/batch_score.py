@@ -13,7 +13,7 @@ def score_batch(
     model_path: Path,
     input_path: Path,
     output_path: Path,
-    threshold: float = 0.5,
+    threshold: float | None = None,
 ) -> pd.DataFrame:
     """Load a fitted pipeline and score all rows in the input CSV.
 
@@ -28,7 +28,10 @@ def score_batch(
             ``label`` and ``timestamp``).
         output_path: Destination CSV path; parent directories are created
             if they do not exist.
-        threshold: Decision threshold for converting scores to labels.
+        threshold: Decision threshold for converting scores to labels. When
+            ``None`` (the default), the model bundle's metadata threshold is
+            used, matching the API and cost-sensitive evaluation. Pass a value
+            only to override the optimized threshold.
 
     Returns:
         DataFrame written to *output_path*, including all original columns
@@ -75,8 +78,11 @@ def main() -> None:
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.5,
-        help="Decision threshold (default 0.5).",
+        default=None,
+        help=(
+            "Decision threshold. Defaults to the model's metadata threshold "
+            "(the cost-optimal frozen threshold); pass a value to override it."
+        ),
     )
     args = parser.parse_args()
     result = score_batch(args.model, args.input, args.output, args.threshold)
