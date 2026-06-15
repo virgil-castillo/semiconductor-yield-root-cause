@@ -71,6 +71,25 @@ class TestSpcFlagRate:
         result = spc_flag_rate(df, ["sensor_000"])
         assert result["sensor_000"] > 0.0
 
+    def test_reference_population_sets_control_limits(self) -> None:
+        """Limits come from *reference*, not the batch being scored.
+
+        A batch shifted far from a tight reference is flagged against the
+        reference's narrow limits, whereas using the shifted batch as its own
+        reference (the default) self-normalises and flags nothing.
+        """
+        reference = pd.DataFrame({"sensor_000": [0.0, 1.0, -1.0, 0.5, -0.5]})
+        # Batch sits ~100 units away from the reference mean of 0.
+        batch = pd.DataFrame({"sensor_000": [100.0, 101.0, 99.0, 100.5, 99.5]})
+
+        against_reference = spc_flag_rate(
+            batch, ["sensor_000"], reference=reference
+        )
+        self_normalised = spc_flag_rate(batch, ["sensor_000"])
+
+        assert against_reference["sensor_000"] == pytest.approx(1.0)
+        assert self_normalised["sensor_000"] == pytest.approx(0.0)
+
 
 class TestFailShapLift:
     def test_returns_dataframe(self) -> None:

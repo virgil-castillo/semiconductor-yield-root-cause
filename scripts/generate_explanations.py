@@ -56,7 +56,10 @@ def main() -> None:
     explanations = compute_shap_values(pipeline, X_train, X_test)
 
     global_imp = global_feature_importance(explanations)
-    flag_rates = spc_flag_rate(test, sensor_cols)
+    # Derive SPC control limits from the stable training pass population so a
+    # broad excursion in the test batch cannot self-normalise its own flag rate.
+    train_pass = train[train["label"] == 0]
+    flag_rates = spc_flag_rate(test, sensor_cols, reference=train_pass)
     lift_df = fail_shap_lift(explanations, y_test)
     root_cause_df = rank_root_cause_candidates(global_imp, lift_df, flag_rates)
 

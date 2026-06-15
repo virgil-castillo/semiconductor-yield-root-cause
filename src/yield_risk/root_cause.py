@@ -11,27 +11,39 @@ def spc_flag_rate(
     df: pd.DataFrame,
     sensor_cols: list[str],
     n_sigma: float = 3.0,
+    reference: pd.DataFrame | None = None,
 ) -> pd.Series:
-    """Compute the fraction of rows outside mean ± n_sigma for each sensor.
+    """Compute the fraction of *df* rows outside mean ± n_sigma for each sensor.
 
     Implements Western Electric Rule 1: a point is flagged when it falls more
-    than *n_sigma* standard deviations from the column mean.  Sensors with
-    zero variance are never flagged (division by zero is avoided by treating
-    std=0 as infinite spread).
+    than *n_sigma* standard deviations from the control-limit centre.  Sensors
+    with zero variance are never flagged (division by zero is avoided by
+    treating std=0 as infinite spread).
+
+    The control limits (mean and standard deviation) are computed from
+    *reference* when provided, then applied to *df*.  Deriving the limits from a
+    stable reference population — for example the training pass population —
+    avoids self-normalisation: a broad excursion in *df* would otherwise inflate
+    its own mean and std and mute the very shift being looked for.  When
+    *reference* is ``None`` the limits fall back to *df* itself (in-sample,
+    less robust).
 
     Args:
-        df: DataFrame containing *sensor_cols*.
+        df: DataFrame containing *sensor_cols* whose rows are evaluated.
         sensor_cols: Sensor column names to evaluate.
         n_sigma: Number of standard deviations for the control limits.
+        reference: Population used to compute the control limits. When ``None``,
+            *df* is used as its own reference.
 
     Returns:
-        Series indexed by sensor name, values are the fraction of rows
+        Series indexed by sensor name, values are the fraction of *df* rows
         flagged in [0, 1].
     """
-    subset = df[sensor_cols]
-    means = subset.mean()
-    stds = subset.std().replace(0.0, float("inf"))
-    z_scores = (subset - means).abs() / stds
+    ref = df if reference is None else reference
+    ref_subset = ref[sensor_cols]
+    means = ref_subset.mean()
+    stds = ref_subset.std().replace(0.0, float("inf"))
+    z_scores = (df[sensor_cols] - means).abs() / stds
     flags = z_scores > n_sigma
     rate: pd.Series = flags.mean()
     return rate
