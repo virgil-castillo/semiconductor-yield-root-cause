@@ -279,8 +279,8 @@ def render_model_card(inputs: ReportInputs) -> str:
         "## Monitoring Hooks\n\n"
         "- Available checks: missingness drift, feature distribution drift, "
         "prediction distribution drift, and high-risk-rate drift.\n"
-        "- The checks compare reference and current batches from the processed "
-        "dataset and surface alert counts and drift flags for engineering "
+        "- The checks compare reference and current batches from the held-out "
+        "test split and surface alert counts and drift flags for engineering "
         "review.\n"
     )
 

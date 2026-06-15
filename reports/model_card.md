@@ -30,4 +30,4 @@ Selection is fixed before held-out evaluation: random forest by the highest mean
 ## Monitoring Hooks
 
 - Available checks: missingness drift, feature distribution drift, prediction distribution drift, and high-risk-rate drift.
-- The checks compare reference and current batches from the processed dataset and surface alert counts and drift flags for engineering review.
+- The checks compare reference and current batches from the held-out test split and surface alert counts and drift flags for engineering review.
