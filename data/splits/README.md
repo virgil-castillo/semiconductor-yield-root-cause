@@ -4,7 +4,7 @@ Raw stratified train/test splits produced by `scripts/split_data.py`.
 
 These hold RAW rows: NaNs are intact and every sensor column is retained.
 Imputation and feature selection happen later, inside the model pipeline, so
-they refit per CV fold and stay leak-free.
+they refit per CV fold.
 
 | File | Description |
 |------|-------------|

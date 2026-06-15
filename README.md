@@ -127,7 +127,7 @@ semiconductor-yield-root-cause/
 ├── notebooks/
 │   ├── 01_eda.ipynb
 │   ├── 02_sensor_shortlist.ipynb
-│   ├── 04_model_training_evaluation.ipynb
+│   ├── 03_model_training_evaluation.ipynb
 │   ├── 05_root_cause_analysis.ipynb
 │   ├── 05_2_xgboost_root_cause_sensitivity.ipynb
 │   ├── 06_cost_sensitive_thresholding.ipynb  # Planned
