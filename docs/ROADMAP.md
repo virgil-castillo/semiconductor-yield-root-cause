@@ -124,7 +124,7 @@ Depends on: Tier 2, Tier 3, Tier 4
 
 ## Tier 7 — Notebooks
 
-Depends on: Tier 1 (notebooks 01–02), Tier 2 (03), Tier 3 (05–06), Tier 4 (07)
+Depends on: Tier 1 (notebooks 01–02), Tier 2 (03), Tier 3 (04–06), Tier 4 (07)
 
 | Phase | Deliverable | File | Status |
 |-------|-------------|------|--------|
@@ -132,7 +132,8 @@ Depends on: Tier 1 (notebooks 01–02), Tier 2 (03), Tier 3 (05–06), Tier 4 (0
 | 7-B | Sensor shortlist — rank sensors by point-biserial correlation and Cohen's d; produce a 15-sensor shortlist for a deliberate-input alternative pipeline | `notebooks/02_sensor_shortlist.ipynb` | ✅ |
 | 7-C | Baseline (logistic regression) — folded into the four-family comparison | `notebooks/03_model_training_evaluation.ipynb` | ✅ |
 | 7-D | Model training + evaluation | `notebooks/03_model_training_evaluation.ipynb` | ✅ |
-| 7-E | Root-cause analysis | `notebooks/05_root_cause_analysis.ipynb` | ✅ |
+| 7-E | Root-cause analysis | `notebooks/04_root_cause_analysis.ipynb` | ✅ |
+| 7-E.2 | XGBoost sensitivity check — confirm top sensors hold under the near-tie challenger | `notebooks/04_2_xgboost_root_cause_sensitivity.ipynb` | ✅ |
 | 7-F | Cost-sensitive thresholding | `notebooks/06_cost_sensitive_thresholding.ipynb` | ⬜ |
 | 7-G | Model monitoring + drift checks | `notebooks/07_model_monitoring_drift_checks.ipynb` | ✅ |
 

@@ -28,7 +28,7 @@ def main() -> None:
 
     - ``shap_values.npz``: raw SHAP values for the test set
     - ``shap_global_importance.csv``: mean |SHAP| per feature, sorted
-    - ``root_cause_candidates.csv``: sensors ranked by composite score
+    - ``root_cause_candidates.csv``: sensors ranked by mean absolute SHAP
 
     Raises:
         ValueError: If the processed test CSV contains no sensor_ columns.
@@ -56,8 +56,6 @@ def main() -> None:
     explanations = compute_shap_values(pipeline, X_train, X_test)
 
     global_imp = global_feature_importance(explanations)
-    # Derive SPC control limits from the stable training pass population so a
-    # broad excursion in the test batch cannot self-normalise its own flag rate.
     train_pass = train[train["label"] == 0]
     flag_rates = spc_flag_rate(test, sensor_cols, reference=train_pass)
     lift_df = fail_shap_lift(explanations, y_test)

@@ -28,7 +28,6 @@ ROOT_CAUSE_COLUMNS = [
     "mean_abs_shap",
     "shap_lift",
     "spc_flag_rate",
-    "composite_score",
 ]
 REPORT_FILENAMES = {
     "executive_summary": "executive_summary.md",
@@ -202,7 +201,7 @@ def render_executive_summary(inputs: ReportInputs) -> str:
         if top is None
         else (
             f"`{top['sensor']}` "
-            f"(composite score {_format_float(top['composite_score'])})"
+            f"(mean absolute SHAP {_format_float(top['mean_abs_shap'])})"
         )
     )
     xgboost_text = ""
@@ -346,7 +345,7 @@ def render_root_cause_report(inputs: ReportInputs) -> str:
         "root_cause_candidates",
     )
     ranked = inputs.root_cause_candidates.sort_values(
-        "composite_score",
+        "mean_abs_shap",
         ascending=False,
     )
     top = ranked.iloc[0] if not ranked.empty else None
@@ -355,7 +354,7 @@ def render_root_cause_report(inputs: ReportInputs) -> str:
         if top is None
         else (
             f"`{top['sensor']}` is the top root-cause candidate "
-            f"(composite score {_format_float(top['composite_score'])})."
+            f"(mean absolute SHAP {_format_float(top['mean_abs_shap'])})."
         )
     )
     evidence_text = (
@@ -364,9 +363,8 @@ def render_root_cause_report(inputs: ReportInputs) -> str:
         else (
             "Why it leads: "
             f"mean absolute SHAP {_format_float(top['mean_abs_shap'])}, "
-            f"fail/pass lift {_format_float(top['shap_lift'])}, "
-            f"SPC flag rate {_format_float(top['spc_flag_rate'])}, and "
-            f"composite score {_format_float(top['composite_score'])}."
+            f"fail/pass lift {_format_float(top['shap_lift'])}, and "
+            f"SPC flag rate {_format_float(top['spc_flag_rate'])}."
         )
     )
     top_sensor = None if top is None else str(top["sensor"])
@@ -519,7 +517,7 @@ def _top_root_cause_candidate(inputs: ReportInputs) -> pd.Series | None:
     if inputs.root_cause_candidates.empty:
         return None
     ranked = inputs.root_cause_candidates.sort_values(
-        "composite_score",
+        "mean_abs_shap",
         ascending=False,
     )
     return ranked.iloc[0]

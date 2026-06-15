@@ -85,14 +85,12 @@ def root_cause_candidates() -> pd.DataFrame:
                 "mean_abs_shap": 0.61,
                 "shap_lift": 2.4,
                 "spc_flag_rate": 0.18,
-                "composite_score": 0.89,
             },
             {
                 "sensor": "sensor_002",
                 "mean_abs_shap": 0.38,
                 "shap_lift": 1.6,
                 "spc_flag_rate": 0.12,
-                "composite_score": 0.54,
             },
         ]
     )

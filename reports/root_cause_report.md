@@ -1,25 +1,25 @@
 # Root-Cause Candidate Report
 
-`sensor_059` is the top root-cause candidate (composite score 0.800).
+`sensor_059` is the top root-cause candidate (mean absolute SHAP 0.010).
 
-Why it leads: mean absolute SHAP 0.010, fail/pass lift 0.019, SPC flag rate 0.000, and composite score 0.800.
+Why it leads: mean absolute SHAP 0.010, fail/pass lift 0.019, and SPC flag rate 0.000.
 
 Next engineering action: map the top sensor IDs to process step, tool, chamber, recipe, lot, and maintenance context before changing process settings. The SECOM sensor IDs are anonymized, so this metadata join connects the ranking to fab action.
 
 ## Top Candidates
 
-| sensor | mean_abs_shap | shap_lift | spc_flag_rate | composite_score |
-| --- | --- | --- | --- | --- |
-| sensor_059 | 0.010 | 0.019 | 0.000 | 0.800 |
-| sensor_033 | 0.007 | 0.004 | 0.017 | 0.487 |
-| sensor_103 | 0.006 | 0.003 | 0.004 | 0.356 |
-| sensor_031 | 0.006 | -0.002 | 0.000 | 0.307 |
-| sensor_021 | 0.004 | 0.001 | 0.021 | 0.290 |
-| sensor_064 | 0.003 | 0.004 | 0.017 | 0.275 |
-| sensor_205 | 0.004 | 0.004 | 0.004 | 0.261 |
-| sensor_129 | 0.004 | 0.003 | 0.000 | 0.256 |
-| sensor_065 | 0.003 | 0.002 | 0.021 | 0.243 |
-| sensor_433 | 0.001 | 0.000 | 0.051 | 0.241 |
+| sensor | mean_abs_shap | shap_lift | spc_flag_rate |
+| --- | --- | --- | --- |
+| sensor_059 | 0.010 | 0.019 | 0.000 |
+| sensor_033 | 0.007 | 0.004 | 0.017 |
+| sensor_103 | 0.006 | 0.003 | 0.004 |
+| sensor_031 | 0.006 | -0.002 | 0.000 |
+| sensor_129 | 0.004 | 0.003 | 0.000 |
+| sensor_130 | 0.004 | 0.002 | 0.000 |
+| sensor_021 | 0.004 | 0.001 | 0.021 |
+| sensor_205 | 0.004 | 0.004 | 0.004 |
+| sensor_510 | 0.003 | 0.001 | 0.013 |
+| sensor_064 | 0.003 | 0.004 | 0.017 |
 
 ## Sensitivity
 

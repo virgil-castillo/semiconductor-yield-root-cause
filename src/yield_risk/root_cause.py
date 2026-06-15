@@ -102,57 +102,32 @@ def fail_shap_lift(
     )
 
 
-def _min_max_normalize(s: pd.Series) -> pd.Series:
-    """Min-max scale a Series to [0, 1]; returns zeros when range is zero.
-
-    Args:
-        s: Numeric Series to normalize.
-
-    Returns:
-        Series of the same index with values in [0, 1].
-    """
-    rng = float(s.max() - s.min())
-    if rng == 0.0:
-        return pd.Series(0.0, index=s.index)
-    result: pd.Series = (s - s.min()) / rng
-    return result
-
-
 def rank_root_cause_candidates(
     global_importance: pd.DataFrame,
     shap_lift_df: pd.DataFrame,
     flag_rates: pd.Series,
 ) -> pd.DataFrame:
-    """Combine SHAP importance, fail/pass lift, and SPC flag rate into a ranked list.
+    """Rank sensors by SHAP attribution with SPC flag rate as supplementary signal.
 
-    Merges the three signals on the feature/sensor name, min-max normalises
-    each signal, then computes a weighted composite score::
+    Merges mean absolute SHAP, fail/pass SHAP lift, and SPC flag rate on the
+    feature/sensor name and sorts by ``mean_abs_shap`` descending.  The SPC
+    flag rate and SHAP lift are supplementary columns for engineering review;
+    the primary ranking is model attribution only.
 
-        composite_score = 0.5 * norm(mean_abs_shap)
-                        + 0.3 * norm(|shap_lift|)
-                        + 0.2 * norm(spc_flag_rate)
-
-    Sensors absent from *flag_rates* are assigned a flag rate of 0.0.
+    Sensors absent from *shap_lift_df* receive lift of 0.0.  Sensors absent
+    from *flag_rates* receive a flag rate of 0.0.
 
     Args:
-        global_importance: DataFrame from
-            :func:`~yield_risk.explainability.global_feature_importance` with
-            columns ``[feature, mean_abs_shap]``.
-        shap_lift_df: DataFrame from :func:`fail_shap_lift` with columns
-            ``[feature, fail_mean_shap, pass_mean_shap, shap_lift]``.
-        flag_rates: Series from :func:`spc_flag_rate`, indexed by sensor
-            name with fraction-flagged values.
+        global_importance: DataFrame from global_feature_importance with
+            columns [feature, mean_abs_shap].
+        shap_lift_df: DataFrame from fail_shap_lift with columns
+            [feature, fail_mean_shap, pass_mean_shap, shap_lift].
+        flag_rates: Series from spc_flag_rate, indexed by sensor name.
 
     Returns:
-        DataFrame with columns:
-
-        - ``sensor``: sensor name
-        - ``mean_abs_shap``: global SHAP importance
-        - ``shap_lift``: fail mean SHAP − pass mean SHAP
-        - ``spc_flag_rate``: fraction of rows triggering SPC flag
-        - ``composite_score``: weighted normalised composite in [0, 1]
-
-        Sorted by ``composite_score`` descending, index reset to 0..N-1.
+        DataFrame with columns [sensor, mean_abs_shap, shap_lift,
+        spc_flag_rate], sorted by mean_abs_shap descending, index reset to
+        0..N-1.
     """
     merged = global_importance.merge(
         shap_lift_df[["feature", "shap_lift"]], on="feature", how="left"
@@ -167,22 +142,10 @@ def rank_root_cause_candidates(
     merged["shap_lift"] = merged["shap_lift"].fillna(0.0)
     merged["spc_flag_rate"] = merged["spc_flag_rate"].fillna(0.0)
 
-    merged["composite_score"] = (
-        0.5 * _min_max_normalize(merged["mean_abs_shap"])
-        + 0.3 * _min_max_normalize(merged["shap_lift"].abs())
-        + 0.2 * _min_max_normalize(merged["spc_flag_rate"])
-    )
-
     return (
         merged.rename(columns={"feature": "sensor"})[
-            [
-                "sensor",
-                "mean_abs_shap",
-                "shap_lift",
-                "spc_flag_rate",
-                "composite_score",
-            ]
+            ["sensor", "mean_abs_shap", "shap_lift", "spc_flag_rate"]
         ]
-        .sort_values("composite_score", ascending=False)
+        .sort_values("mean_abs_shap", ascending=False)
         .reset_index(drop=True)
     )

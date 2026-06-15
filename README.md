@@ -128,8 +128,8 @@ semiconductor-yield-root-cause/
 │   ├── 01_eda.ipynb
 │   ├── 02_sensor_shortlist.ipynb
 │   ├── 03_model_training_evaluation.ipynb
-│   ├── 05_root_cause_analysis.ipynb
-│   ├── 05_2_xgboost_root_cause_sensitivity.ipynb
+│   ├── 04_root_cause_analysis.ipynb
+│   ├── 04_2_xgboost_root_cause_sensitivity.ipynb
 │   ├── 06_cost_sensitive_thresholding.ipynb  # Planned
 │   └── 07_model_monitoring_drift_checks.ipynb
 │
@@ -586,7 +586,7 @@ candidate ranking and remains first in the XGBoost sensitivity check.
 on four sensors (`sensor_059`, `sensor_033`, `sensor_103`, `sensor_021`), with
 a looser top-ten overlap of 4/10. The reporting pipeline does not persist a
 cross-model sensitivity artifact; the comparison is computed for display in
-`notebooks/05_2_xgboost_root_cause_sensitivity.ipynb`.
+`notebooks/04_2_xgboost_root_cause_sensitivity.ipynb`.
 
 ---
 
