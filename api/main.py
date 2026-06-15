@@ -107,6 +107,15 @@ def _invalid_feature_keys(features: dict[str, float]) -> list[str]:
     A key is valid iff it matches ``sensor_NNN`` where ``NNN`` is exactly three
     digits and the integer value is in ``[0, 589]``.
 
+    Note:
+        This is a SECOM raw-input namespace check, not a per-model check. A key
+        can be namespace-valid yet absent from the loaded model's
+        ``expected_sensors`` (the model may have been trained on a subset). Such
+        keys are accepted here and then dropped at scoring time by
+        :func:`yield_risk.scoring.score_frame`, which aligns inputs to
+        ``bundle.expected_sensors``. The namespace is the request contract; the
+        model's ``expected_sensors`` is the scoring contract.
+
     Args:
         features: Mapping of feature key to numeric value from the request.
 

@@ -476,7 +476,10 @@ curl -X POST http://localhost:8000/predict \
   imputed by the pipeline; only sensors of interest need to be supplied.
 - **Risk flag logic.** `risk_flag = failure_probability >= threshold_used`.
 - **Valid feature keys.** Keys must be within the `sensor_000..sensor_589`
-  namespace; any key outside that range returns 400.
+  namespace; any key outside that range returns 400. The namespace is the
+  request contract, not a per-model check: a namespace-valid sensor that is not
+  in the loaded model's expected set is accepted and then dropped at scoring
+  time (inputs are aligned to the model's `expected_sensors`).
 
 | Status | Condition |
 |--------|-----------|
@@ -561,26 +564,29 @@ set is used once for final comparison and cost-threshold evaluation.
 
 | Model | CV PR-AUC | Test PR-AUC | Test ROC-AUC | Recall (fail) | Precision | Opt. threshold | Cost |
 |-------|-----------|-------------|--------------|---------------|-----------|----------------|------|
-| Dummy (stratified) | 0.066 | 0.066 | 0.490 | 0.048 | 0.048 | 0.01 | 220 |
-| Logistic Regression | 0.182 | 0.210 | 0.669 | 0.571 | 0.130 | 0.47 | 170 |
-| Random Forest | **0.217** | 0.193 | 0.758 | 0.571 | 0.171 | 0.08 | 148 |
-| XGBoost | 0.208 | **0.261** | **0.802** | **0.667** | **0.222** | 0.03 | **119** |
+| Dummy (stratified) | 0.066 | 0.068 | 0.504 | 0.063 | 0.077 | 0.01 | 162 |
+| Logistic Regression | 0.180 | 0.168 | 0.726 | 0.313 | 0.143 | 0.52 | 140 |
+| Random Forest | **0.227** | **0.222** | **0.793** | **0.813** | **0.197** | 0.14 | **83** |
+| XGBoost | 0.206 | 0.213 | 0.786 | 0.625 | 0.156 | 0.02 | 114 |
 
-**Selected model:** random forest, chosen by the training-only CV protocol.
-XGBoost performs better on the held-out test set; random forest remains the
-selected model under the training-CV protocol.
+**Selected model:** random forest, chosen by the training-only CV protocol. It
+also leads on the held-out test set (PR-AUC 0.222 vs XGBoost 0.213), so the
+family fixed on cross-validation is confirmed by the single test-set look;
+XGBoost is the closest challenger.
 
 **Selected-model root-cause candidates:** `sensor_059`, `sensor_033`,
-`sensor_519`, `sensor_205`, `sensor_031` from
+`sensor_103`, `sensor_031`, `sensor_021` from
 `reports/root_cause_candidates.csv`.
 
 `sensor_059` is the first sensor to inspect. It leads the selected model's
 candidate ranking and remains first in the XGBoost sensitivity check.
 
-**XGBoost sensitivity check:** the near-tie XGBoost model also ranks
+**XGBoost sensitivity check:** the challenger XGBoost model also ranks
 `sensor_059` first. Its top-five candidates overlap the selected random forest
-by 4/5 sensors, and the top-ten overlap is 7/10
-(`reports/root_cause_model_sensitivity_summary.csv`).
+on four sensors (`sensor_059`, `sensor_033`, `sensor_103`, `sensor_021`), with
+a looser top-ten overlap of 4/10. The reporting pipeline does not persist a
+cross-model sensitivity artifact; the comparison is computed for display in
+`notebooks/05_2_xgboost_root_cause_sensitivity.ipynb`.
 
 ---
 
