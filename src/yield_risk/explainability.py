@@ -68,6 +68,11 @@ def compute_shap_values(
     to the explainer.  SHAP values are always extracted for the positive class
     (class index 1 for binary classification).
 
+    Feature names reflect the post-selection feature space: when a
+    ``"preprocess"`` step (e.g. ``SecomPreprocessor``) drops columns, the
+    returned ``feature_names`` contain only the kept column names, matching
+    the width of the SHAP value array.
+
     Args:
         pipeline: Fitted sklearn Pipeline whose last step is the classifier.
         X_background: Background dataset for explainer initialisation. Should
@@ -114,9 +119,17 @@ def compute_shap_values(
         shap_vals = sv
         base = float(ev[1]) if hasattr(ev, "__len__") else float(ev)
 
+    # Derive feature names from the post-transform feature space so they
+    # always match the SHAP array width even when a preprocess step drops columns.
+    if len(pipeline.steps) > 1:
+        pre_pipeline = Pipeline(pipeline.steps[:-1])
+        feature_names: list[str] = list(pre_pipeline.get_feature_names_out())
+    else:
+        feature_names = list(X_explain.columns)
+
     return ShapExplanations(
         shap_values=shap_vals,
-        feature_names=list(X_explain.columns),
+        feature_names=feature_names,
         base_value=base,
     )
 

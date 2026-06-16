@@ -1,4 +1,0 @@
-top_n,overlap_count,jaccard,overlap_sensors
-5,4,0.6666666666666666,"sensor_033, sensor_059, sensor_205, sensor_519"
-10,7,0.5384615384615384,"sensor_031, sensor_033, sensor_059, sensor_129, sensor_160, sensor_205, sensor_519"
-20,12,0.42857142857142855,"sensor_021, sensor_031, sensor_033, sensor_059, sensor_129, sensor_160, sensor_175, sensor_205, sensor_460, sensor_510, sensor_519, sensor_572"

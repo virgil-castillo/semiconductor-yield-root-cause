@@ -61,7 +61,6 @@ class TestSpcFlagRate:
         assert result["sensor_000"] == pytest.approx(0.0)
 
     def test_outlier_sensor_has_nonzero_flag_rate(self) -> None:
-        # First value is 100σ away from the rest
         vals = [0.0] * 19 + [1000.0]
         df = pd.DataFrame({
             "sensor_000": vals,
@@ -70,6 +69,14 @@ class TestSpcFlagRate:
         })
         result = spc_flag_rate(df, ["sensor_000"])
         assert result["sensor_000"] > 0.0
+
+    def test_reference_population_sets_control_limits(self) -> None:
+        reference = pd.DataFrame({"sensor_000": [0.0, 1.0, -1.0, 0.5, -0.5]})
+        batch = pd.DataFrame({"sensor_000": [100.0, 101.0, 99.0, 100.5, 99.5]})
+        against_reference = spc_flag_rate(batch, ["sensor_000"], reference=reference)
+        self_normalised = spc_flag_rate(batch, ["sensor_000"])
+        assert against_reference["sensor_000"] == pytest.approx(1.0)
+        assert self_normalised["sensor_000"] == pytest.approx(0.0)
 
 
 class TestFailShapLift:
@@ -162,25 +169,16 @@ class TestRankRootCauseCandidates:
             "mean_abs_shap",
             "shap_lift",
             "spc_flag_rate",
-            "composite_score",
         ):
             assert col in result.columns
 
-    def test_sorted_by_composite_score_descending(
+    def test_sorted_by_mean_abs_shap_descending(
         self, inputs: tuple[pd.DataFrame, pd.DataFrame, pd.Series]
     ) -> None:
         global_imp, lift_df, flag_rates = inputs
         result = rank_root_cause_candidates(global_imp, lift_df, flag_rates)
-        scores = result["composite_score"].tolist()
+        scores = result["mean_abs_shap"].tolist()
         assert scores == sorted(scores, reverse=True)
-
-    def test_composite_score_in_zero_one(
-        self, inputs: tuple[pd.DataFrame, pd.DataFrame, pd.Series]
-    ) -> None:
-        global_imp, lift_df, flag_rates = inputs
-        result = rank_root_cause_candidates(global_imp, lift_df, flag_rates)
-        assert (result["composite_score"] >= 0).all()
-        assert (result["composite_score"] <= 1).all()
 
     def test_row_count_matches_features(
         self, inputs: tuple[pd.DataFrame, pd.DataFrame, pd.Series]
@@ -201,5 +199,5 @@ class TestRankRootCauseCandidates:
         assert len(row) == 1
         assert not pd.isna(row["shap_lift"].iloc[0])
         assert row["shap_lift"].iloc[0] == pytest.approx(0.0)
-        # composite score must also be non-NaN
-        assert not pd.isna(row["composite_score"].iloc[0])
+        # spc flag rate must also be non-NaN
+        assert not pd.isna(row["spc_flag_rate"].iloc[0])

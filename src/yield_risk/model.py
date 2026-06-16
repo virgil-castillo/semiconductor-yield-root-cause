@@ -8,19 +8,24 @@ from typing import Any, cast
 
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator
+from sklearn.base import BaseEstimator, clone
 from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.model_selection import (
     RandomizedSearchCV,
     StratifiedKFold,
+    cross_val_predict,
     cross_val_score,
-    cross_validate,
 )
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
+
+from yield_risk.config import CostMatrix, ThresholdSearchConfig
+from yield_risk.preprocess import SecomPreprocessor
+from yield_risk.thresholding import find_optimal_threshold
 
 
 def build_baseline_pipeline(random_seed: int) -> Pipeline:
@@ -70,36 +75,96 @@ def train_model(
     return pipeline
 
 
-def cross_validate_model(
-    pipeline: Pipeline,
+def _check_positive_per_fold(
+    y: pd.Series,
+    cv: StratifiedKFold,
+) -> None:
+    """Raise ValueError if any validation fold contains zero positive examples.
+
+    Args:
+        y: Label series.
+        cv: StratifiedKFold splitter to check.
+
+    Raises:
+        ValueError: If a validation fold has no positive examples, naming the
+            zero-indexed fold number.
+    """
+    y_arr = np.asarray(y)
+    for fold_idx, (_, val_idx) in enumerate(
+        cv.split(np.zeros(len(y_arr)), y_arr)
+    ):
+        n_pos = int((y_arr[val_idx] == 1).sum())
+        if n_pos == 0:
+            raise ValueError(
+                f"Fold {fold_idx} validation split contains zero positive "
+                "examples. PR-AUC is undefined. Ensure positives are spread "
+                "across the dataset before calling cross-validation."
+            )
+
+
+def compute_fold_diagnostics(
+    estimator: Pipeline,
     X: pd.DataFrame,
     y: pd.Series,
     cv_folds: int,
     random_seed: int,
-) -> dict[str, np.ndarray]:
-    """Run stratified k-fold cross-validation and return per-fold scores.
+) -> list[dict[str, float | int]]:
+    """Compute per-fold validation diagnostics using stratified k-fold CV.
 
-    Uses sklearn.model_selection.cross_validate with
-    scoring=["roc_auc", "f1"]. The pipeline is cloned internally per fold.
+    Clones the estimator for each fold, fits on the training indices, and
+    evaluates on the validation indices. Raises before any fitting if any
+    validation fold contains zero positive examples.
 
     Args:
-        pipeline: sklearn Pipeline (fitted or unfitted; cloned internally).
+        estimator: Unfitted (or previously fitted) sklearn Pipeline. It is
+            cloned internally; the original is not mutated.
         X: Feature matrix.
-        y: Labels.
-        cv_folds: Number of stratified folds.
-        random_seed: Random state for StratifiedKFold.
+        y: Labels (0/1).
+        cv_folds: Number of stratified folds for ``StratifiedKFold``.
+        random_seed: Random state for the ``StratifiedKFold`` shuffle,
+            ensuring reproducible fold assignments.
 
     Returns:
-        Dict with keys "test_roc_auc" and "test_f1", each a numpy array
-        of length cv_folds.
+        List of length ``cv_folds``. Each dict has keys:
+
+        - ``fold`` (int): Zero-based fold index.
+        - ``val_prevalence`` (float): Fraction of positive labels in the
+          validation split.
+        - ``roc_auc`` (float): ROC-AUC on the validation split.
+        - ``pr_auc`` (float): PR-AUC (average precision) on the validation
+          split.
+
+    Raises:
+        ValueError: If any validation fold contains zero positive examples
+            (PR-AUC is undefined in that case).
     """
-    cv = StratifiedKFold(
-        n_splits=cv_folds, shuffle=True, random_state=random_seed
-    )
-    results = cross_validate(
-        pipeline, X, y, cv=cv, scoring=["roc_auc", "f1"]
-    )
-    return cast(dict[str, np.ndarray], results)
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_seed)
+    _check_positive_per_fold(y, cv)
+
+    diagnostics: list[dict[str, float | int]] = []
+    y_arr = np.asarray(y)
+    X_vals = X.values
+
+    for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X_vals, y_arr)):
+        X_train_fold = X.iloc[train_idx]
+        y_train_fold = y.iloc[train_idx]
+        X_val_fold = X.iloc[val_idx]
+        y_val_fold = y_arr[val_idx]
+
+        fold_estimator: Pipeline = clone(estimator)
+        fold_estimator.fit(X_train_fold, y_train_fold)
+        y_prob = fold_estimator.predict_proba(X_val_fold)[:, 1]
+
+        diagnostics.append(
+            {
+                "fold": fold_idx,
+                "val_prevalence": float(y_val_fold.mean()),
+                "roc_auc": float(roc_auc_score(y_val_fold, y_prob)),
+                "pr_auc": float(average_precision_score(y_val_fold, y_prob)),
+            }
+        )
+
+    return diagnostics
 
 
 @dataclass
@@ -143,12 +208,45 @@ def _build_random_forest(random_seed: int) -> BaseEstimator:
     )
 
 
+class _BalancedXGBClassifier(XGBClassifier):
+    """XGBoost classifier that derives ``scale_pos_weight`` at fit time.
+
+    The positive-class weight is computed from the labels passed to
+    :meth:`fit` rather than once on the full training set before
+    cross-validation. This keeps each CV fold's class-ratio parameter a
+    function of that fold's training labels only, so validation-fold labels
+    never leak into model selection.
+    """
+
+    def fit(
+        self, X: pd.DataFrame, y: pd.Series, **kwargs: object
+    ) -> _BalancedXGBClassifier:
+        """Set ``scale_pos_weight`` from *y*'s class ratio, then fit.
+
+        Args:
+            X: Training feature matrix.
+            y: Training labels (0/1).
+            **kwargs: Forwarded to :meth:`xgboost.XGBClassifier.fit`.
+
+        Returns:
+            The fitted estimator.
+        """
+        y_arr = np.asarray(y)
+        n_pos = int((y_arr == 1).sum())
+        n_neg = int((y_arr == 0).sum())
+        self.scale_pos_weight = (n_neg / n_pos) if n_pos else 1.0
+        super().fit(X, y, **kwargs)
+        return self
+
+
 def _build_xgboost(random_seed: int) -> BaseEstimator:
     """Build a histogram-based XGBoost classifier (single-threaded estimator).
 
-    scale_pos_weight is set from the class ratio at search time, not here.
+    Uses :class:`_BalancedXGBClassifier`, which derives ``scale_pos_weight``
+    from each fold's own training labels at fit time, avoiding the
+    validation-label leak that arises from setting it once before CV.
     """
-    return XGBClassifier(
+    return _BalancedXGBClassifier(
         eval_metric="logloss",
         tree_method="hist",
         random_state=random_seed,
@@ -173,16 +271,28 @@ MODEL_REGISTRY: dict[str, FamilySpec] = {
 }
 
 
-def build_pipeline(name: str, random_seed: int) -> Pipeline:
+def build_pipeline(
+    name: str,
+    random_seed: int,
+    missing_threshold: float,
+    cv_threshold: float,
+    correlation_threshold: float,
+) -> Pipeline:
     """Build an unfitted pipeline for a registered model family.
 
-    Adds a StandardScaler step only for families that require scaling. The
-    final step is always named "classifier", so the explainability code's
-    pre-final transform logic continues to work.
+    Prepends a ``SecomPreprocessor`` step (named ``"preprocess"``) for every
+    family. Adds a ``StandardScaler`` step only for families that require
+    scaling. Step order: ``preprocess`` → (``scaler``) → ``classifier``.
 
     Args:
         name: Family identifier present in MODEL_REGISTRY.
         random_seed: Random state passed to the estimator factory.
+        missing_threshold: Passed to SecomPreprocessor — drop columns with
+            missing fraction strictly above this.
+        cv_threshold: Passed to SecomPreprocessor — drop columns with
+            coefficient of variation strictly below this.
+        correlation_threshold: Passed to SecomPreprocessor — drop the later of
+            each pair with absolute correlation strictly above this.
 
     Returns:
         Unfitted sklearn Pipeline.
@@ -191,11 +301,83 @@ def build_pipeline(name: str, random_seed: int) -> Pipeline:
         KeyError: If name is not a registered family.
     """
     spec = MODEL_REGISTRY[name]
-    steps: list[tuple[str, BaseEstimator]] = []
+    steps: list[tuple[str, BaseEstimator]] = [
+        (
+            "preprocess",
+            SecomPreprocessor(
+                missing_threshold=missing_threshold,
+                cv_threshold=cv_threshold,
+                correlation_threshold=correlation_threshold,
+            ),
+        ),
+    ]
     if spec.needs_scaling:
         steps.append(("scaler", StandardScaler()))
     steps.append(("classifier", spec.build(random_seed)))
     return Pipeline(steps)
+
+
+def frozen_operating_threshold(
+    estimator: Pipeline,
+    X: pd.DataFrame,
+    y: pd.Series,
+    cv_folds: int,
+    random_seed: int,
+    cost_matrix: CostMatrix,
+    threshold_search: ThresholdSearchConfig,
+) -> float:
+    """Derive the cost-optimal operating threshold from pooled OOF CV predictions.
+
+    Runs ``cross_val_predict`` over a ``StratifiedKFold`` to obtain out-of-fold
+    probability scores for every training sample, then calls
+    ``find_optimal_threshold`` on those pooled predictions. The embedded
+    ``SecomPreprocessor`` is refit on each fold's training split inside
+    ``cross_val_predict``.
+
+    Args:
+        estimator: Unfitted (or fitted) sklearn Pipeline.  It is cloned
+            internally by ``cross_val_predict`` so the original is not mutated.
+        X: Training feature matrix.
+        y: Training labels (0/1).
+        cv_folds: Number of stratified folds for ``StratifiedKFold``.
+        random_seed: Random state for the ``StratifiedKFold`` shuffle,
+            ensuring reproducible fold assignments and identical OOF scores
+            across calls with the same seed.
+        cost_matrix: Per-outcome costs used by ``find_optimal_threshold``.
+        threshold_search: Grid parameters (low, high, steps) for the threshold
+            search.
+
+    Returns:
+        The threshold (float) that minimises expected cost on pooled OOF
+        predictions.  The value lies in
+        ``[threshold_search.low, threshold_search.high]``.
+    """
+    cv = StratifiedKFold(
+        n_splits=cv_folds, shuffle=True, random_state=random_seed
+    )
+    oof = cross_val_predict(estimator, X, y, cv=cv, method="predict_proba")
+    return find_optimal_threshold(
+        np.asarray(y), oof[:, 1], cost_matrix, threshold_search
+    ).threshold
+
+
+def model_feature_names(pipeline: Pipeline) -> list[str]:
+    """Return feature names output by the pipeline's preprocess step.
+
+    Args:
+        pipeline: Fitted sklearn Pipeline containing a ``"preprocess"`` step
+            (SecomPreprocessor).
+
+    Returns:
+        List of kept column name strings from the fitted preprocessor.
+
+    Raises:
+        sklearn.exceptions.NotFittedError: If the preprocess step has not been
+            fitted yet.
+        KeyError: If the pipeline has no ``"preprocess"`` step.
+    """
+    preprocessor: SecomPreprocessor = pipeline.named_steps["preprocess"]
+    return list(preprocessor.get_feature_names_out())
 
 
 @dataclass
@@ -248,7 +430,12 @@ def select_best(results: list[SearchResult]) -> str:
 
     Returns:
         The winning family's name.
+
+    Raises:
+        ValueError: If *results* is empty.
     """
+    if not results:
+        raise ValueError("select_best requires at least one SearchResult.")
     return max(results, key=lambda r: r.cv_pr_auc_mean).name
 
 
@@ -259,15 +446,24 @@ def run_search(
     model_cfg: dict[str, Any],
     cv_folds: int,
     random_seed: int,
+    missing_threshold: float,
+    cv_threshold: float,
+    correlation_threshold: float,
     n_jobs: int = -1,
 ) -> SearchResult:
-    """Tune one model family with cross-validated PR-AUC and refit the winner.
+    """Tune one model family with stratified CV PR-AUC and refit the winner.
 
-    Tunable families are searched with RandomizedSearchCV; ``n_iter`` is capped
-    at the size of the discrete grid so small grids do not raise. The dummy
-    family has no grid: it is fit directly and scored with cross_val_score so it
-    still appears as the chance floor. For XGBoost, ``scale_pos_weight`` is set
-    from the training class ratio before searching.
+    Uses ``StratifiedKFold`` (shuffle=True) for both hyperparameter search and
+    the dummy baseline. Raises if any validation fold contains zero positive
+    examples.
+
+    Tunable families are searched with ``RandomizedSearchCV``; ``n_iter`` is
+    capped at the size of the discrete grid so small grids do not raise. The
+    dummy family has no grid: it is fit directly and scored with
+    ``cross_val_score`` so it still appears as the chance floor. For XGBoost,
+    ``scale_pos_weight`` is derived per fold from that fold's own training
+    labels at fit time (see :class:`_BalancedXGBClassifier`), so no
+    validation-fold labels enter the class-ratio parameter.
 
     Args:
         name: Registered family identifier.
@@ -275,21 +471,29 @@ def run_search(
         y: Training labels (0/1).
         model_cfg: Parsed model_config.yaml (keys ``models`` and ``search``).
         cv_folds: Number of stratified folds.
-        random_seed: Random state for CV and the estimator.
+        random_seed: Random state for the estimator, the StratifiedKFold
+            shuffle, and RandomizedSearchCV.
+        missing_threshold: Passed through to build_pipeline / SecomPreprocessor.
+        cv_threshold: Passed through to build_pipeline / SecomPreprocessor.
+        correlation_threshold: Passed through to build_pipeline / SecomPreprocessor.
         n_jobs: Parallel jobs for the search (bound to the CPU allocation).
 
     Returns:
         SearchResult with the refit best estimator and its CV PR-AUC.
+
+    Raises:
+        ValueError: If any validation fold contains zero positive examples.
     """
     spec = MODEL_REGISTRY[name]
-    pipeline = build_pipeline(name, random_seed)
+    pipeline = build_pipeline(
+        name,
+        random_seed,
+        missing_threshold=missing_threshold,
+        cv_threshold=cv_threshold,
+        correlation_threshold=correlation_threshold,
+    )
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_seed)
-
-    if name == "xgboost":
-        n_pos = int((y == 1).sum())
-        n_neg = int((y == 0).sum())
-        scale = (n_neg / n_pos) if n_pos else 1.0
-        pipeline.set_params(classifier__scale_pos_weight=scale)
+    _check_positive_per_fold(y, cv)
 
     if not spec.tunable:
         scores = cross_val_score(pipeline, X, y, cv=cv, scoring="average_precision")

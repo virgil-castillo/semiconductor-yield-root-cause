@@ -1,11 +1,11 @@
 """Feature selection, imputation, and train/test split for the SECOM pipeline."""
 from __future__ import annotations
 
-from typing import cast
-
 import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.model_selection import train_test_split
+from sklearn.utils.validation import check_is_fitted
 
 from yield_risk.config import RunConfig
 
@@ -13,80 +13,207 @@ _NON_SENSOR: frozenset[str] = frozenset({"label", "timestamp"})
 
 
 def _sensor_cols(df: pd.DataFrame) -> list[str]:
+    """Return column names that are not label or timestamp.
+
+    Args:
+        df: DataFrame with mixed sensor and metadata columns.
+
+    Returns:
+        List of sensor column names.
+    """
     return [c for c in df.columns if c not in _NON_SENSOR]
 
 
-def drop_high_missing(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
-    """Drop sensor columns whose missing-value fraction is strictly above threshold.
+def _drop_high_missing(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    """Drop columns whose missing-value fraction is strictly above threshold.
 
     Args:
-        df: DataFrame with sensor, label, and timestamp columns.
-        threshold: Columns with a missing fraction strictly above this value
-            are removed.
+        df: Sensor-only DataFrame (no label/timestamp).
+        threshold: Columns with missing fraction strictly above this are removed.
 
     Returns:
-        DataFrame with high-missing sensor columns removed.
+        DataFrame with high-missing columns removed.
     """
-    cols = _sensor_cols(df)
-    missing_rate = df[cols].isnull().mean()
+    missing_rate = df.isnull().mean()
     to_drop = [str(c) for c in missing_rate[missing_rate > threshold].index]
     return df.drop(columns=to_drop)
 
 
-def impute_median(df: pd.DataFrame) -> pd.DataFrame:
-    """Fill missing values in sensor columns with each column's median.
-
-    The median is computed from non-null values in that column.
-
-    Args:
-        df: DataFrame with sensor, label, and timestamp columns.
-
-    Returns:
-        Copy of *df* with NaN values in sensor columns replaced by column medians.
-    """
-    cols = _sensor_cols(df)
-    medians = df[cols].median()
-    result = df.copy()
-    result[cols] = df[cols].fillna(medians)
-    return result
-
-
-def drop_low_variance(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
-    """Drop sensor columns whose variance is strictly below threshold.
+def _impute_with_medians(
+    df: pd.DataFrame, medians: pd.Series
+) -> pd.DataFrame:
+    """Fill NaN values in *df* using the provided per-column medians.
 
     Args:
-        df: DataFrame with sensor, label, and timestamp columns.
-        threshold: Columns with variance strictly below this value are removed.
+        df: Sensor-only DataFrame (subset of columns present in medians).
+        medians: Series of median values indexed by column name.
 
     Returns:
-        DataFrame with low-variance sensor columns removed.
+        Copy of *df* with NaN values replaced by the supplied medians.
     """
-    cols = _sensor_cols(df)
-    variances = df[cols].var()
-    to_drop = [str(c) for c in variances[variances < threshold].index]
+    return df.fillna(medians)
+
+
+def _drop_low_cv(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    """Drop columns whose coefficient of variation is strictly below threshold.
+
+    The coefficient of variation (CV) is ``std / |mean|``, a scale-adjusted
+    measure of variability. Unlike raw variance, it does not penalise a sensor
+    merely for operating on a small absolute scale, so low-scale sensors that
+    still move relative to their mean are retained. Two boundary cases are
+    defined explicitly to match the EDA decision record (notebook 01):
+
+    - mean == 0 and std == 0 (a flat sensor): CV is defined as 0.0, so the
+      sensor is dropped.
+    - mean == 0 and std > 0 (oscillates about zero): CV is defined as +inf, so
+      the sensor is kept.
+
+    Args:
+        df: Sensor-only DataFrame with no missing values (imputed upstream).
+        threshold: Columns with CV strictly below this are removed.
+
+    Returns:
+        DataFrame with low-CV columns removed.
+    """
+    abs_mean = df.mean().abs()
+    std = df.std()
+    cv = (std / abs_mean.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+    cv[(abs_mean == 0) & (std == 0)] = 0.0
+    cv[(abs_mean == 0) & (std > 0)] = np.inf
+    to_drop = [str(c) for c in cv[cv < threshold].index]
     return df.drop(columns=to_drop)
 
 
-def drop_high_correlation(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
-    """Drop one column from each highly-correlated pair.
-
-    Uses the upper triangle of the absolute correlation matrix.  For each
-    correlated pair the later column (by position) is removed.
+def _drop_high_correlation(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    """Drop one column from each highly-correlated pair (later by position).
 
     Args:
-        df: DataFrame with sensor, label, and timestamp columns.
+        df: Sensor-only DataFrame.
         threshold: Drop a column if its absolute correlation with any earlier
             column strictly exceeds this value.
 
     Returns:
-        DataFrame with one column from each highly-correlated pair removed.
+        DataFrame with one column from each correlated pair removed.
     """
-    cols = _sensor_cols(df)
-    corr = df[cols].corr().abs()
+    corr = df.corr().abs()
     mask = np.triu(np.ones(corr.shape, dtype=bool), k=1)
     upper = corr.where(mask)
     to_drop = [str(c) for c in upper.columns if bool((upper[c] > threshold).any())]
     return df.drop(columns=to_drop)
+
+
+class SecomPreprocessor(BaseEstimator, TransformerMixin):  # type: ignore[misc]
+    """sklearn-compatible transformer that learns feature selection and medians.
+
+    Applies, in order: missing-rate filter, median imputation, CV filter,
+    correlation filter.  All statistics are learned from the training data only.
+
+    Args:
+        missing_threshold: Drop columns with missing fraction strictly above this.
+        cv_threshold: Drop columns with coefficient of variation strictly below
+            this.
+        correlation_threshold: Drop the later of each pair with |r| strictly
+            above this value.
+    """
+
+    def __init__(
+        self,
+        missing_threshold: float,
+        cv_threshold: float,
+        correlation_threshold: float,
+    ) -> None:
+        """Store hyperparameters verbatim (sklearn convention — no mutation here).
+
+        Args:
+            missing_threshold: Missing-rate upper bound for kept columns.
+            cv_threshold: Coefficient-of-variation lower bound for kept columns.
+            correlation_threshold: Absolute-correlation upper bound between
+                any two kept columns.
+        """
+        self.missing_threshold = missing_threshold
+        self.cv_threshold = cv_threshold
+        self.correlation_threshold = correlation_threshold
+
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: object = None,
+    ) -> SecomPreprocessor:
+        """Learn kept columns and per-column medians from training rows.
+
+        Pipeline order:
+        1. Missing-rate filter (strictly above missing_threshold → dropped).
+        2. Per-column median computation and internal imputation.
+        3. CV filter (strictly below cv_threshold → dropped).
+        4. Correlation filter (later column of pair with |r| > correlation_threshold
+           → dropped).
+
+        Args:
+            X: Sensor-only DataFrame (no label/timestamp columns).
+            y: Ignored; present for sklearn API compatibility.
+
+        Returns:
+            self (fitted transformer).
+        """
+        # Step 1: missing-rate filter
+        after_missing = _drop_high_missing(X, self.missing_threshold)
+
+        # Step 2: compute medians on training non-null values; impute internally
+        train_medians: pd.Series = after_missing.median()
+        after_imputed = _impute_with_medians(after_missing, train_medians)
+
+        # Step 3: CV filter (on imputed data)
+        after_cv = _drop_low_cv(after_imputed, self.cv_threshold)
+
+        # Step 4: correlation filter
+        after_correlation = _drop_high_correlation(
+            after_cv, self.correlation_threshold
+        )
+
+        # Store fitted attributes
+        self.kept_columns_: list[str] = list(after_correlation.columns)
+        # Restrict medians to kept columns only
+        self.medians_: pd.Series = train_medians[self.kept_columns_]
+        self.n_features_in_: int = X.shape[1]
+        self.feature_names_in_: np.ndarray = np.array(list(X.columns), dtype=object)
+
+        return self
+
+    def transform(self, X: pd.DataFrame, y: object = None) -> pd.DataFrame:
+        """Select kept columns and impute NaNs with training medians.
+
+        Args:
+            X: Sensor-only DataFrame with at least the kept columns present.
+            y: Ignored; present for sklearn API compatibility.
+
+        Returns:
+            DataFrame containing only the kept columns, with NaNs filled by
+            the training-set medians.
+
+        Raises:
+            NotFittedError: If called before fit.
+        """
+        check_is_fitted(self, ["kept_columns_", "medians_"])
+        out = X[self.kept_columns_].copy()
+        out = _impute_with_medians(out, self.medians_)
+        return out
+
+    def get_feature_names_out(
+        self, input_features: object = None
+    ) -> list[str]:
+        """Return the names of the kept sensor columns.
+
+        Args:
+            input_features: Ignored; present for sklearn API compatibility.
+
+        Returns:
+            List of kept column name strings.
+
+        Raises:
+            NotFittedError: If called before fit.
+        """
+        check_is_fitted(self, ["kept_columns_"])
+        return list(self.kept_columns_)
 
 
 def split_stratified(
@@ -94,48 +221,63 @@ def split_stratified(
     test_size: float,
     random_seed: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Stratified train/test split that preserves the class ratio of ``label``.
+    """Stratified random holdout split preserving positive-class prevalence.
+
+    Uses ``sklearn.model_selection.train_test_split`` with
+    ``stratify=df["label"]`` so that both splits mirror the overall
+    positive-class rate.  NaN values in sensor columns are preserved.
 
     Args:
-        df: DataFrame containing a ``label`` column.
-        test_size: Fraction of rows to place in the test split.
-        random_seed: Random seed for reproducibility.
+        df: DataFrame containing a ``label`` column with binary class values.
+        test_size: Fraction of rows to place in the test split (e.g. 0.15).
+        random_seed: Seed for the random-number generator to ensure
+            reproducibility.
 
     Returns:
-        Tuple of ``(train_df, test_df)``.
+        Tuple of ``(train_df, test_df)`` with NaNs intact and all columns.
+        Index values are the original row positions from *df*.
+
+    Raises:
+        ValueError: If either split contains only one distinct class in
+            ``label`` (single-class split).
     """
-    splits = train_test_split(
+    train, test = train_test_split(
         df,
         test_size=test_size,
-        random_state=random_seed,
         stratify=df["label"],
+        random_state=random_seed,
     )
-    return cast(pd.DataFrame, splits[0]), cast(pd.DataFrame, splits[1])
+
+    for name, split in (("train", train), ("test", test)):
+        n_classes = split["label"].nunique()
+        if n_classes < 2:
+            raise ValueError(
+                f"single-class split: the {name} split contains only "
+                f"{n_classes} distinct class(es) in 'label'. "
+                "Adjust test_size so both splits have at least two classes."
+            )
+
+    return train, test
 
 
-def run_preprocessing(
+def split_train_test(
     df: pd.DataFrame,
     run_cfg: RunConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Apply feature selection, imputation, and stratified train/test split.
+    """Stratified-split the raw DataFrame into train and test halves.
 
-    Pipeline order:
-    1. drop_high_missing(df, run_cfg.missing_threshold)
-    2. impute_median(result)
-    3. drop_low_variance(result, run_cfg.variance_threshold)
-    4. drop_high_correlation(result, run_cfg.correlation_threshold)
-    5. split_stratified(result, run_cfg.test_size, run_cfg.random_seed)
+    Returns raw splits with NaNs intact and all sensor columns retained.
+    No timestamp sorting, imputation, or feature selection is performed here;
+    apply ``SecomPreprocessor`` to the training split to learn those transforms.
 
     Args:
         df: Raw SECOM DataFrame (output of load_secom, already validated).
-        run_cfg: RunConfig with thresholds and split parameters.
+        run_cfg: RunConfig with split parameters (test_size and random_seed
+            used).
 
     Returns:
-        Tuple of (train_df, test_df). Both contain sensor columns, label,
-        and timestamp. No NaN values in sensor columns.
+        Tuple of (train_df, test_df).  Both contain all sensor columns, label,
+        and timestamp.  NaN values in sensor columns are preserved.  Both
+        splits reflect the overall positive-class prevalence (stratified).
     """
-    result = drop_high_missing(df, run_cfg.missing_threshold)
-    result = impute_median(result)
-    result = drop_low_variance(result, run_cfg.variance_threshold)
-    result = drop_high_correlation(result, run_cfg.correlation_threshold)
-    return split_stratified(result, run_cfg.test_size, run_cfg.random_seed)
+    return split_stratified(df, run_cfg.test_size, run_cfg.random_seed)

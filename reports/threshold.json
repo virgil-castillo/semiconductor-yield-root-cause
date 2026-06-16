@@ -1,0 +1,4 @@
+{
+  "model": "random_forest",
+  "threshold": 0.14
+}

@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
 
+from yield_risk.config import CostMatrix
 from yield_risk.evaluate import (
     ClassificationMetrics,
     compute_metrics,
+    evaluate_at_threshold,
     format_report,
     plot_confusion_matrix,
     plot_precision_recall_curve,
@@ -117,3 +120,58 @@ class TestPlotFunctions:
         plot_precision_recall_curve(y_true, y_prob, 1.0, out)
         assert out.exists()
         assert out.stat().st_size > 0
+
+
+# ---------------------------------------------------------------------------
+# evaluate_at_threshold
+# ---------------------------------------------------------------------------
+
+_EVAL_COST_MATRIX = CostMatrix(
+    true_pass=0.0,
+    true_fail=0.0,
+    false_fail=1.0,
+    false_pass=5.0,
+)
+
+_Y_EVAL_TRUE = np.array([0, 0, 1, 1, 0, 1])
+_Y_EVAL_PROB = np.array([0.1, 0.2, 0.8, 0.9, 0.3, 0.7])
+
+
+class TestEvaluateAtThreshold:
+    """Tests for evaluate_at_threshold helper."""
+
+    def test_does_not_call_find_optimal_threshold(self) -> None:
+        """evaluate_at_threshold never calls find_optimal_threshold."""
+        spy = Mock()
+        with patch("yield_risk.thresholding.find_optimal_threshold", spy):
+            evaluate_at_threshold(
+                _Y_EVAL_TRUE, _Y_EVAL_PROB, 0.4, _EVAL_COST_MATRIX
+            )
+        spy.assert_not_called()
+
+    def test_returns_metrics_and_cost(self) -> None:
+        """Returns a (ClassificationMetrics, float) tuple."""
+        metrics, cost = evaluate_at_threshold(
+            _Y_EVAL_TRUE, _Y_EVAL_PROB, 0.5, _EVAL_COST_MATRIX
+        )
+        assert isinstance(metrics, ClassificationMetrics)
+        assert isinstance(cost, float)
+        assert cost >= 0.0
+
+    def test_metrics_threshold_applied(self) -> None:
+        """Metrics match compute_metrics at the same threshold."""
+        threshold = 0.6
+        metrics, _ = evaluate_at_threshold(
+            _Y_EVAL_TRUE, _Y_EVAL_PROB, threshold, _EVAL_COST_MATRIX
+        )
+        expected = compute_metrics(_Y_EVAL_TRUE, _Y_EVAL_PROB, threshold=threshold)
+        assert metrics.roc_auc == pytest.approx(expected.roc_auc)
+        assert metrics.recall == pytest.approx(expected.recall)
+        assert metrics.precision == pytest.approx(expected.precision)
+
+    def test_cost_is_non_negative(self) -> None:
+        """Expected cost is always >= 0."""
+        _, cost = evaluate_at_threshold(
+            _Y_EVAL_TRUE, _Y_EVAL_PROB, 0.5, _EVAL_COST_MATRIX
+        )
+        assert cost >= 0.0

@@ -43,7 +43,7 @@ Depends on: Tier 0
 | 1-D | Preprocessing pipeline | `src/yield_risk/preprocess.py` | ✅ |
 | 1-E | Feature engineering | `src/yield_risk/features.py` | ✅ |
 | 1-F | Stratified split | `src/yield_risk/preprocess.py` | ✅ |
-| 1-G | Dataset orchestration script | `scripts/preprocess_data.py` | ✅ |
+| 1-G | Dataset orchestration script | `scripts/split_data.py` | ✅ |
 
 **Tests:** `tests/test_data.py`, `tests/test_preprocess.py`, `tests/test_features.py`
 
@@ -124,17 +124,18 @@ Depends on: Tier 2, Tier 3, Tier 4
 
 ## Tier 7 — Notebooks
 
-Depends on: Tier 1 (notebooks 01–03), Tier 2 (04), Tier 3 (05–06), Tier 4 (07)
+Depends on: Tier 1 (notebooks 01–02), Tier 2 (03), Tier 3 (04–06), Tier 4 (07)
 
 | Phase | Deliverable | File | Status |
 |-------|-------------|------|--------|
-| 7-A | EDA — data characterisation and preprocessing config justification (`missing_threshold`, `variance_threshold`, `correlation_threshold`) | `notebooks/01_eda.ipynb` | ✅ |
-| 7-B | EDA — sensor-level failure signals for Tier 3 explainability (point-biserial correlation, pass/fail distributions, SHAP hypotheses) | `notebooks/02_eda_yield_patterns.ipynb` | ✅ |
-| 7-C | Baseline results walkthrough | `notebooks/03_baseline_results.ipynb` | ✅ |
-| 7-D | Model training + evaluation | `notebooks/04_model_training_evaluation.ipynb` | ✅ |
-| 7-E | Root-cause analysis | `notebooks/05_root_cause_analysis.ipynb` | ✅ |
+| 7-A | EDA — data characterisation and preprocessing config justification (`missing_threshold`, `cv_threshold`, `correlation_threshold`) | `notebooks/01_eda.ipynb` | ✅ |
+| 7-B | Sensor shortlist — rank sensors by point-biserial correlation and Cohen's d; produce a 15-sensor shortlist for a deliberate-input alternative pipeline | `notebooks/02_sensor_shortlist.ipynb` | ✅ |
+| 7-C | Baseline (logistic regression) — folded into the four-family comparison | `notebooks/03_model_training_evaluation.ipynb` | ✅ |
+| 7-D | Model training + evaluation | `notebooks/03_model_training_evaluation.ipynb` | ✅ |
+| 7-E | Root-cause analysis | `notebooks/04_root_cause_analysis.ipynb` | ✅ |
+| 7-E.2 | XGBoost sensitivity check — confirm top sensors hold under the near-tie challenger | `notebooks/04_2_xgboost_root_cause_sensitivity.ipynb` | ✅ |
 | 7-F | Cost-sensitive thresholding | `notebooks/06_cost_sensitive_thresholding.ipynb` | ⬜ |
-| 7-G | Model monitoring + drift checks | `notebooks/07_model_monitoring_drift_checks.ipynb` | ✅ |
+| 7-G | Model monitoring + drift checks | `src/yield_risk/monitoring.py`, `scripts/generate_reports.py` | ✅ |
 
 ---
 
@@ -189,3 +190,13 @@ All tiers ───── Tier 9 (Documentation)
 6. Tier 7 notebooks (fill in from working code, not a research exercise)
 7. Tier 8 infrastructure
 8. Tier 9 documentation (README last — fill in real numbers)
+
+---
+
+## Backlog — Future Experiments
+
+Not on the critical path; revisit once Tier 2 is stable.
+
+| Idea | Rationale | Status |
+|------|-----------|--------|
+| Native missing-value handling for tree models (RF, XGBoost) vs. the shared median-imputed `SecomPreprocessor` | Both `RandomForestClassifier` (sklearn ≥1.4) and `XGBClassifier` learn a per-split default direction for NaNs, so missingness can act as a learned signal (e.g., a skipped sensor reading may correlate with yield) instead of being masked by median fill. Requires a separate no-impute preprocessing branch for RF/XGB only, since `logistic_regression`/`dummy` need complete data and the variance/correlation filters currently run on imputed data — keep the existing imputed pipeline as the baseline for comparison. | ⬜ |

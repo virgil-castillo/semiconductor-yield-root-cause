@@ -18,6 +18,8 @@ from yield_risk.explainability import (
     local_explanation,
     save_shap_values,
 )
+from yield_risk.model import model_feature_names
+from yield_risk.preprocess import SecomPreprocessor
 
 
 @pytest.fixture()
@@ -262,3 +264,83 @@ class TestTreeExplainerDispatch:
         assert "shap_value" in local.columns
         abs_vals = local["shap_value"].abs().tolist()
         assert abs_vals == sorted(abs_vals, reverse=True)
+
+
+class TestPreprocessPipelineFeatureNames:
+    """SHAP feature names use post-selection names when preprocess drops columns."""
+
+    def _build_pipeline_with_dropped_col(
+        self,
+    ) -> tuple[Pipeline, pd.DataFrame, pd.DataFrame]:
+        """Return a fitted pipeline, background df, and explain df.
+
+        sensor_000, sensor_001, sensor_002 are normal random features.
+        sensor_constant is all-zeros — CV = 0, dropped by SecomPreprocessor.
+        """
+        rng = np.random.default_rng(42)
+        n_train = 60
+
+        X_train = pd.DataFrame(
+            {
+                "sensor_000": rng.normal(size=n_train),
+                "sensor_001": rng.normal(size=n_train),
+                "sensor_002": rng.normal(size=n_train),
+                "sensor_constant": np.zeros(n_train),  # CV = 0 — dropped
+            }
+        )
+        y_train = pd.Series([0] * 52 + [1] * 8)
+
+        X_bg = pd.DataFrame(
+            {
+                "sensor_000": rng.normal(size=20),
+                "sensor_001": rng.normal(size=20),
+                "sensor_002": rng.normal(size=20),
+                "sensor_constant": np.zeros(20),
+            }
+        )
+        X_ex = pd.DataFrame(
+            {
+                "sensor_000": rng.normal(size=10),
+                "sensor_001": rng.normal(size=10),
+                "sensor_002": rng.normal(size=10),
+                "sensor_constant": np.zeros(10),
+            }
+        )
+
+        # cv_threshold=0.01: sensor_constant (CV=0) is below this → dropped
+        pipeline = Pipeline(
+            [
+                (
+                    "preprocess",
+                    SecomPreprocessor(
+                        missing_threshold=1.0,
+                        cv_threshold=0.01,
+                        correlation_threshold=1.0,
+                    ),
+                ),
+                ("scaler", StandardScaler()),
+                (
+                    "classifier",
+                    LogisticRegression(
+                        max_iter=500, random_state=0, class_weight="balanced"
+                    ),
+                ),
+            ]
+        )
+        pipeline.fit(X_train, y_train)
+        return pipeline, X_bg, X_ex
+
+    def test_feature_names_match_model_feature_names(self) -> None:
+        pipeline, X_bg, X_ex = self._build_pipeline_with_dropped_col()
+        result = compute_shap_values(pipeline, X_bg, X_ex)
+        assert result.feature_names == model_feature_names(pipeline)
+
+    def test_feature_names_length_matches_shap_width(self) -> None:
+        pipeline, X_bg, X_ex = self._build_pipeline_with_dropped_col()
+        result = compute_shap_values(pipeline, X_bg, X_ex)
+        assert len(result.feature_names) == result.shap_values.shape[1]
+
+    def test_dropped_column_excluded_from_feature_names(self) -> None:
+        pipeline, X_bg, X_ex = self._build_pipeline_with_dropped_col()
+        result = compute_shap_values(pipeline, X_bg, X_ex)
+        assert "sensor_constant" not in result.feature_names

@@ -2,10 +2,25 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Protocol, cast
 
+import joblib
 import numpy as np
 import pandas as pd
 from scipy.stats import ks_2samp
+
+
+class _ProbabilityEstimator(Protocol):
+    def predict_proba(self, features: pd.DataFrame) -> np.ndarray:
+        """Return class probabilities for feature rows.
+
+        Args:
+            features: Feature matrix to score.
+
+        Returns:
+            Probability array with one column per class.
+        """
 
 
 @dataclass
@@ -524,3 +539,72 @@ def _safe_median(values: np.ndarray) -> float:
 
 def _absolute_delta(left: float, right: float) -> float:
     return abs(right - left)
+
+
+@dataclass
+class ReferenceProfile:
+    """Training-time snapshot of the reference distribution for drift checks.
+
+    Saved once after model selection and loaded by the monitoring notebook
+    instead of reloading raw training data at runtime.
+
+    Attributes:
+        features: Sensor-column DataFrame from the training set.
+        scores: Model prediction scores for every training row.
+        sensor_cols: Ordered list of sensor column names.
+        high_risk_threshold: Operating threshold from the frozen model card.
+    """
+
+    features: pd.DataFrame
+    scores: np.ndarray
+    sensor_cols: list[str]
+    high_risk_threshold: float
+
+
+def build_reference_profile(
+    train: pd.DataFrame,
+    sensor_cols: list[str],
+    model: _ProbabilityEstimator,
+    high_risk_threshold: float,
+) -> ReferenceProfile:
+    """Build a reference profile from the training set.
+
+    Args:
+        train: Training DataFrame; non-sensor columns are ignored.
+        sensor_cols: Sensor column names to include in the profile.
+        model: Fitted classifier exposing ``predict_proba``.
+        high_risk_threshold: Operating threshold from the frozen model card.
+
+    Returns:
+        ReferenceProfile containing sensor features and prediction scores.
+    """
+    features = train[sensor_cols].copy()
+    scores = model.predict_proba(features)[:, 1].astype(float)
+    return ReferenceProfile(
+        features=features,
+        scores=scores,
+        sensor_cols=list(sensor_cols),
+        high_risk_threshold=float(high_risk_threshold),
+    )
+
+
+def save_reference_profile(profile: ReferenceProfile, path: Path | str) -> None:
+    """Serialize a ReferenceProfile to disk with joblib.
+
+    Args:
+        profile: The reference profile to save.
+        path: Destination file path (e.g. ``models/reference_profile.joblib``).
+    """
+    joblib.dump(profile, path)
+
+
+def load_reference_profile(path: Path | str) -> ReferenceProfile:
+    """Load a ReferenceProfile from disk.
+
+    Args:
+        path: Path to a serialized ReferenceProfile.
+
+    Returns:
+        Deserialized ReferenceProfile.
+    """
+    return cast(ReferenceProfile, joblib.load(path))

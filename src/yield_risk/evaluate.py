@@ -21,6 +21,9 @@ from sklearn.metrics import (
     roc_curve,
 )
 
+from yield_risk.config import CostMatrix
+from yield_risk.thresholding import expected_cost_at_threshold
+
 
 @dataclass
 class ClassificationMetrics:
@@ -67,6 +70,35 @@ def compute_metrics(
         f1=float(f1_score(y_true, y_pred, zero_division=0)),
         confusion_matrix=confusion_matrix(y_true, y_pred).tolist(),
     )
+
+
+def evaluate_at_threshold(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    threshold: float,
+    cost_matrix: CostMatrix,
+) -> tuple[ClassificationMetrics, float]:
+    """Apply a frozen threshold and return metrics plus expected cost.
+
+    Computes ``ClassificationMetrics`` via :func:`compute_metrics` and expected
+    cost via :func:`~yield_risk.thresholding.expected_cost_at_threshold`, both
+    at *threshold*.
+
+    Args:
+        y_true: Ground-truth binary labels (0 or 1), shape (n_samples,).
+        y_prob: Predicted probabilities for the positive class, shape
+            (n_samples,).
+        threshold: Decision threshold to apply (frozen, derived from training
+            data).
+        cost_matrix: Per-outcome costs used to compute expected cost.
+
+    Returns:
+        Tuple of ``(ClassificationMetrics, expected_cost)`` where
+        ``expected_cost`` is a non-negative float.
+    """
+    metrics = compute_metrics(y_true, y_prob, threshold=threshold)
+    cost = expected_cost_at_threshold(y_true, y_prob, threshold, cost_matrix)
+    return metrics, cost
 
 
 def format_report(metrics: ClassificationMetrics, model_name: str = "Model") -> str:

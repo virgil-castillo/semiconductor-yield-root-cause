@@ -19,6 +19,7 @@ dependencies = [
     "lightgbm>=4.3",
     "optuna>=3.6",
     "shap>=0.45",
+    "optuna>=3.6",
     "matplotlib>=3.8",
     "plotly>=5.20",
     "streamlit>=1.35",
@@ -99,3 +100,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Make the CLI entry points in scripts/ importable by name (e.g. `import
+# batch_score`) via pytest's supported pythonpath mechanism, instead of
+# mutating sys.path at import time in a conftest.
+pythonpath = ["scripts"]

@@ -2,22 +2,6 @@
 
 Dev contract for Claude Code when working in this repository.
 
-## Environment
-
-Conda lives at `$env:USERPROFILE\miniconda3`. Claude Code does not inherit a login shell, so the `mlops` env must be activated explicitly before running Python commands.
-
-**PowerShell tool:**
-```powershell
-. "$env:USERPROFILE\miniconda3\shell\condabin\conda-hook.ps1"
-conda activate mlops
-```
-
-**Bash tool:**
-```bash
-source ~/miniconda3/Scripts/activate
-conda activate mlops
-```
-
 ## Commands
 
 ```bash

@@ -1,8 +1,10 @@
 """Generate models/model_metadata.json for the yield-risk prediction API.
 
-Loads the selected pipeline and test predictions, computes the cost-optimal
-threshold from configs/cost_config.yaml, and writes a JSON artifact that
-``yield_risk.scoring.load_model_bundle`` reads at serving time.
+Loads the selected pipeline and test predictions, reads the frozen operating
+threshold from the ``"threshold"`` field of the selected entry in
+cv_results.json (produced by train_models.py from OOF train predictions), and
+writes a JSON artifact that ``yield_risk.scoring.load_model_bundle`` reads at
+serving time.
 """
 from __future__ import annotations
 
@@ -17,28 +19,45 @@ import joblib
 import pandas as pd
 
 from yield_risk.config import load_config, load_cost_config
-from yield_risk.thresholding import find_optimal_threshold
+from yield_risk.evaluate import compute_metrics
+from yield_risk.model import model_feature_names
 
 
 def export_model_metadata(
     model_path: Path,
     test_path: Path,
     cv_results_path: Path,
-    metrics_path: Path,
     cost_config_path: Path,
     output_path: Path,
 ) -> dict[str, Any]:
     """Export model metadata to a JSON file.
 
-    Loads the selected pipeline and held-out test set, computes the
-    cost-optimal threshold, and writes a JSON artifact that
+    Loads the selected pipeline and held-out test set, reads the frozen
+    operating threshold from the selected entry in cv_results.json, applies
+    that threshold to test to compute metrics, and writes a JSON artifact that
     ``yield_risk.scoring.load_model_bundle`` reads at serving time.
+
+    The ``metrics`` block is computed directly from the loaded pipeline, test
+    data, and the frozen threshold, so the served artifact's ``metrics``,
+    ``frozen_threshold``, ``model_version``, ``expected_sensors``, and
+    ``selected_features`` all describe the same model and test set from this
+    invocation.
+
+    The artifact includes two feature-related fields:
+
+    * ``expected_sensors`` — the full raw ``sensor_`` column set read from the
+      test CSV.  The serving path aligns raw input to these columns before
+      calling ``pipeline.predict_proba``.
+    * ``selected_features`` — the post-selection feature names returned by
+      ``model_feature_names(pipeline)``, i.e. the columns the classifier
+      actually uses after the pipeline's ``preprocess`` step.
 
     Args:
         model_path: Path to the joblib-serialised selected pipeline.
         test_path: Path to the held-out test CSV (sensor cols + label).
         cv_results_path: Path to cv_results.json produced by train_models.py.
-        metrics_path: Path to selected_model_metrics.json.
+            Each entry must contain a ``"threshold"`` key (the frozen operating
+            point derived from OOF CV predictions on the training set).
         cost_config_path: Path to cost_config.yaml.
         output_path: Destination path for model_metadata.json.
 
@@ -48,6 +67,8 @@ def export_model_metadata(
     Raises:
         FileNotFoundError: If any required input file does not exist.
         ValueError: If no entry in cv_results_path has ``selected: true``.
+        ValueError: If the selected entry in cv_results_path lacks a
+            ``"threshold"`` key (artifact produced by an older train run).
     """
     # Load pipeline
     pipeline = joblib.load(model_path)
@@ -59,36 +80,46 @@ def export_model_metadata(
     y_test = test_df["label"].to_numpy()
     y_prob = pipeline.predict_proba(X_test)[:, 1]
 
-    # Compute cost-optimal threshold
-    cost_cfg = load_cost_config(cost_config_path)
-    result = find_optimal_threshold(
-        y_test, y_prob, cost_cfg.cost_matrix, cost_cfg.threshold_search
-    )
-    optimal_threshold = float(result.threshold)
-
-    # Model family from cv_results
+    # Read frozen threshold and family from cv_results — never compute on test
     cv_results = json.loads(cv_results_path.read_text())
-    family: str | None = next(
-        (r["model"] for r in cv_results if r["selected"]), None
+    selected_entry: dict[str, Any] | None = next(
+        (r for r in cv_results if r["selected"]), None
     )
-    if family is None:
+    if selected_entry is None:
         raise ValueError(f"No selected model found in {cv_results_path}")
+    if "threshold" not in selected_entry:
+        raise ValueError(
+            f"Selected entry in {cv_results_path} lacks a 'threshold' key. "
+            "Re-run train_models.py to regenerate the artifact with frozen "
+            "thresholds derived from OOF CV predictions."
+        )
+    family: str = selected_entry["model"]
+    frozen_threshold = float(selected_entry["threshold"])
+
+    # Cost matrix (used for metadata only, not for threshold tuning on test)
+    cost_cfg = load_cost_config(cost_config_path)
 
     # Short hash: first 7 chars of sha256 of model file bytes
     short_hash = hashlib.sha256(model_path.read_bytes()).hexdigest()[:7]
     model_version = f"{family}-{short_hash}"
 
-    # Metrics snapshot
-    metrics: dict[str, Any] = json.loads(metrics_path.read_text())
+    # Metrics computed directly at the frozen threshold from the loaded
+    # pipeline + test data, keeping the metrics block consistent with
+    # frozen_threshold and the served model.
+    metrics: dict[str, Any] = dataclasses.asdict(
+        compute_metrics(y_test, y_prob, threshold=frozen_threshold)
+    )
+    metrics["threshold"] = frozen_threshold
 
     # Assemble metadata dict
     metadata: dict[str, Any] = {
         "model_version": model_version,
-        "optimal_threshold": optimal_threshold,
+        "frozen_threshold": frozen_threshold,
         "cost_matrix": dataclasses.asdict(cost_cfg.cost_matrix),
         "created_at": datetime.now(UTC).isoformat(),
         "metrics": metrics,
         "expected_sensors": sensor_cols,
+        "selected_features": model_feature_names(pipeline),
     }
 
     # Write JSON, creating parent dirs if needed
@@ -107,9 +138,8 @@ def main() -> None:
     """
     cfg = load_config()
     model_path = cfg.paths.models_dir / "selected_model.joblib"
-    test_path = cfg.paths.processed_dir / "test.csv"
+    test_path = cfg.paths.splits_dir / "test.csv"
     cv_results_path = cfg.paths.reports_dir / "cv_results.json"
-    metrics_path = cfg.paths.reports_dir / "selected_model_metrics.json"
     cost_config_path = Path("configs/cost_config.yaml")
     output_path = cfg.paths.models_dir / "model_metadata.json"
 
@@ -117,7 +147,6 @@ def main() -> None:
         model_path=model_path,
         test_path=test_path,
         cv_results_path=cv_results_path,
-        metrics_path=metrics_path,
         cost_config_path=cost_config_path,
         output_path=output_path,
     )

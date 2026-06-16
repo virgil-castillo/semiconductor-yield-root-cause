@@ -1,41 +1,173 @@
 [
   {
     "model": "dummy",
-    "cv_pr_auc_mean": 0.06600326720798466,
-    "cv_pr_auc_std": 0.0019094270622714595,
+    "cv_pr_auc_mean": 0.06598204036197565,
+    "cv_pr_auc_std": 0.001976187287485246,
     "best_params": {},
-    "selected": false
+    "selected": false,
+    "folds": [
+      {
+        "fold": 0,
+        "val_prevalence": 0.06741573033707865,
+        "roc_auc": 0.4618473895582329,
+        "pr_auc": 0.06741573033707865
+      },
+      {
+        "fold": 1,
+        "val_prevalence": 0.06390977443609022,
+        "roc_auc": 0.49326718639262934,
+        "pr_auc": 0.06324635117204776
+      },
+      {
+        "fold": 2,
+        "val_prevalence": 0.06390977443609022,
+        "roc_auc": 0.4618473895582329,
+        "pr_auc": 0.06390977443609022
+      },
+      {
+        "fold": 3,
+        "val_prevalence": 0.06766917293233082,
+        "roc_auc": 0.46169354838709675,
+        "pr_auc": 0.06766917293233082
+      },
+      {
+        "fold": 4,
+        "val_prevalence": 0.06766917293233082,
+        "roc_auc": 0.46169354838709675,
+        "pr_auc": 0.06766917293233082
+      }
+    ],
+    "threshold": 0.01
   },
   {
     "model": "logistic_regression",
-    "cv_pr_auc_mean": 0.1819643197311247,
-    "cv_pr_auc_std": 0.09281764282922485,
+    "cv_pr_auc_mean": 0.17972149348719108,
+    "cv_pr_auc_std": 0.06165933710740641,
     "best_params": {
       "classifier__C": 0.001
     },
-    "selected": false
+    "selected": false,
+    "folds": [
+      {
+        "fold": 0,
+        "val_prevalence": 0.06741573033707865,
+        "roc_auc": 0.64636323070058,
+        "pr_auc": 0.11371586005162582
+      },
+      {
+        "fold": 1,
+        "val_prevalence": 0.06390977443609022,
+        "roc_auc": 0.7325773682967163,
+        "pr_auc": 0.23378612162662848
+      },
+      {
+        "fold": 2,
+        "val_prevalence": 0.06390977443609022,
+        "roc_auc": 0.7228915662650602,
+        "pr_auc": 0.2674463917425111
+      },
+      {
+        "fold": 3,
+        "val_prevalence": 0.06766917293233082,
+        "roc_auc": 0.6397849462365591,
+        "pr_auc": 0.11772161665670564
+      },
+      {
+        "fold": 4,
+        "val_prevalence": 0.06766917293233082,
+        "roc_auc": 0.7155017921146953,
+        "pr_auc": 0.16593747735848424
+      }
+    ],
+    "threshold": 0.52
   },
   {
     "model": "random_forest",
-    "cv_pr_auc_mean": 0.21651070471983255,
-    "cv_pr_auc_std": 0.07122680257089363,
+    "cv_pr_auc_mean": 0.22658514096614962,
+    "cv_pr_auc_std": 0.07836327798538385,
     "best_params": {
-      "classifier__n_estimators": 300,
-      "classifier__min_samples_leaf": 1,
+      "classifier__n_estimators": 200,
+      "classifier__min_samples_leaf": 5,
       "classifier__max_depth": 20
     },
-    "selected": true
+    "selected": true,
+    "folds": [
+      {
+        "fold": 0,
+        "val_prevalence": 0.06741573033707865,
+        "roc_auc": 0.6633199464524766,
+        "pr_auc": 0.13406781792276415
+      },
+      {
+        "fold": 1,
+        "val_prevalence": 0.06390977443609022,
+        "roc_auc": 0.7658870777226553,
+        "pr_auc": 0.22145029604869554
+      },
+      {
+        "fold": 2,
+        "val_prevalence": 0.06390977443609022,
+        "roc_auc": 0.7795889440113395,
+        "pr_auc": 0.34621684602290603
+      },
+      {
+        "fold": 3,
+        "val_prevalence": 0.06766917293233082,
+        "roc_auc": 0.6509856630824373,
+        "pr_auc": 0.15409374598697345
+      },
+      {
+        "fold": 4,
+        "val_prevalence": 0.06766917293233082,
+        "roc_auc": 0.7874103942652331,
+        "pr_auc": 0.27709699884940897
+      }
+    ],
+    "threshold": 0.14
   },
   {
     "model": "xgboost",
-    "cv_pr_auc_mean": 0.20818622545384016,
-    "cv_pr_auc_std": 0.09020444784032584,
+    "cv_pr_auc_mean": 0.2061849470841016,
+    "cv_pr_auc_std": 0.06905906277461028,
     "best_params": {
       "classifier__subsample": 0.8,
       "classifier__n_estimators": 100,
       "classifier__max_depth": 7,
       "classifier__learning_rate": 0.1
     },
-    "selected": false
+    "selected": false,
+    "folds": [
+      {
+        "fold": 0,
+        "val_prevalence": 0.06741573033707865,
+        "roc_auc": 0.6695671575189648,
+        "pr_auc": 0.12955971855315235
+      },
+      {
+        "fold": 1,
+        "val_prevalence": 0.06390977443609022,
+        "roc_auc": 0.7325773682967163,
+        "pr_auc": 0.2106276026683988
+      },
+      {
+        "fold": 2,
+        "val_prevalence": 0.06390977443609022,
+        "roc_auc": 0.7840774864162532,
+        "pr_auc": 0.3059448207203679
+      },
+      {
+        "fold": 3,
+        "val_prevalence": 0.06766917293233082,
+        "roc_auc": 0.6610663082437276,
+        "pr_auc": 0.13066169632797564
+      },
+      {
+        "fold": 4,
+        "val_prevalence": 0.06766917293233082,
+        "roc_auc": 0.7399193548387096,
+        "pr_auc": 0.25413089715061327
+      }
+    ],
+    "threshold": 0.02
   }
 ]

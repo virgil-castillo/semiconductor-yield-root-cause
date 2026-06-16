@@ -92,22 +92,47 @@ def find_optimal_threshold(
 ) -> ThresholdResult:
     """Find the decision threshold that minimises expected cost.
 
-    Evaluates all candidate thresholds via :func:`threshold_cost_curve` and
-    returns the one with the lowest expected cost. Ties are broken by choosing
-    the first (lowest) threshold in the search grid.
+    Expected cost is piecewise-constant in the threshold: it changes only as the
+    threshold crosses one of the predicted probabilities. The optimiser
+    therefore evaluates one representative threshold per constant interval — the
+    midpoint between consecutive distinct probabilities, bounded by the
+    configured ``[low, high]`` operating band. This finds the exact minimum
+    without depending on a fixed grid's resolution, and places the chosen
+    threshold *between* observed scores rather than exactly on one, which is more
+    robust to small score shifts on future data. The boundary midpoints also
+    cover the all-flag and all-release regimes within the band.
+
+    Ties are broken by choosing the lowest qualifying threshold (safety-leaning:
+    it flags more wafers), matching ``np.argmin`` on the ascending candidates.
 
     Args:
         y_true: Ground-truth binary labels (0=pass, 1=fail), shape (n,).
         y_prob: Predicted probabilities for the positive class, shape (n,).
         cost_matrix: Per-outcome cost assignments.
-        search: Grid parameters — low, high, and number of steps.
+        search: Operating band — only ``low`` and ``high`` are used here
+            (``steps`` applies to :func:`threshold_cost_curve` for plotting).
 
     Returns:
         ThresholdResult containing the optimal threshold and its expected cost.
     """
-    curve = threshold_cost_curve(y_true, y_prob, cost_matrix, search)
-    best_row = curve.loc[curve["expected_cost"].idxmin()]
+    probs = np.unique(np.asarray(y_prob, dtype=float))
+    # Breakpoints partition [low, high] into constant-cost intervals: the band
+    # edges plus every distinct probability that falls inside the band.
+    breakpoints = np.unique(np.concatenate([[search.low, search.high], probs]))
+    breakpoints = breakpoints[
+        (breakpoints >= search.low) & (breakpoints <= search.high)
+    ]
+    if breakpoints.size >= 2:
+        candidates = (breakpoints[:-1] + breakpoints[1:]) / 2.0
+    else:
+        candidates = np.array([search.low])
+
+    costs = [
+        expected_cost_at_threshold(y_true, y_prob, float(t), cost_matrix)
+        for t in candidates
+    ]
+    best_idx = int(np.argmin(costs))
     return ThresholdResult(
-        threshold=float(best_row["threshold"]),
-        expected_cost=float(best_row["expected_cost"]),
+        threshold=float(candidates[best_idx]),
+        expected_cost=float(costs[best_idx]),
     )

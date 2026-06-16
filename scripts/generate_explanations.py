@@ -28,7 +28,7 @@ def main() -> None:
 
     - ``shap_values.npz``: raw SHAP values for the test set
     - ``shap_global_importance.csv``: mean |SHAP| per feature, sorted
-    - ``root_cause_candidates.csv``: sensors ranked by composite score
+    - ``root_cause_candidates.csv``: sensors ranked by mean absolute SHAP
 
     Raises:
         ValueError: If the processed test CSV contains no sensor_ columns.
@@ -39,8 +39,8 @@ def main() -> None:
     pipeline = joblib.load(model_path)
     print(f"Loaded model from {model_path}")
 
-    train = pd.read_csv(cfg.paths.processed_dir / "train.csv")
-    test = pd.read_csv(cfg.paths.processed_dir / "test.csv")
+    train = pd.read_csv(cfg.paths.splits_dir / "train.csv")
+    test = pd.read_csv(cfg.paths.splits_dir / "test.csv")
     sensor_cols = [c for c in test.columns if c.startswith("sensor_")]
     if not sensor_cols:
         raise ValueError(
@@ -56,7 +56,8 @@ def main() -> None:
     explanations = compute_shap_values(pipeline, X_train, X_test)
 
     global_imp = global_feature_importance(explanations)
-    flag_rates = spc_flag_rate(test, sensor_cols)
+    train_pass = train[train["label"] == 0]
+    flag_rates = spc_flag_rate(test, sensor_cols, reference=train_pass)
     lift_df = fail_shap_lift(explanations, y_test)
     root_cause_df = rank_root_cause_candidates(global_imp, lift_df, flag_rates)
 

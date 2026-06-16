@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import batch_score  # imported via conftest.py sys.path injection
+import batch_score  # importable via [tool.pytest.ini_options] pythonpath
 import joblib
 import numpy as np
 import pandas as pd
@@ -151,7 +151,7 @@ class TestScoreBatch:
     ) -> None:
         """The caller-supplied threshold wins over the bundle's metadata threshold.
 
-        Writes a model_metadata.json with optimal_threshold=0.01, then calls
+        Writes a model_metadata.json with frozen_threshold=0.01, then calls
         score_batch with threshold=0.9.  The fixed seeds produce scores in
         [0.43, 0.55], so every score is >= 0.01 but < 0.9.  If the metadata
         threshold leaked through, all labels would be 1; with threshold=0.9 they
@@ -163,7 +163,7 @@ class TestScoreBatch:
 
         # Write metadata with a very low threshold (0.01) beside the model.
         metadata = {
-            "optimal_threshold": 0.01,
+            "frozen_threshold": 0.01,
             "model_version": "test-v1",
             "expected_sensors": SENSOR_COLS,
         }
@@ -187,6 +187,37 @@ class TestScoreBatch:
         assert (result["predicted_label"] != labels_at_001).any(), (
             "Labels match threshold=0.01 for all rows; the bundle metadata "
             "threshold may have overridden the caller-supplied threshold=0.9."
+        )
+
+    def test_default_uses_bundle_metadata_threshold(self, tmp_path: Path) -> None:
+        """With no threshold argument, labels follow the bundle metadata threshold.
+
+        Writes a model_metadata.json with frozen_threshold=0.0 and calls
+        score_batch without a threshold.  Every score is >= 0.0, so all labels
+        must be 1.  The fixed seeds produce scores in [0.43, 0.55]; since the
+        minimum is below 0.5, the old hard-coded 0.5 default would have left at
+        least one label 0 — which makes the all-ones result a true discriminator.
+        """
+        model_path = _write_model(tmp_path, SENSOR_COLS)
+        input_path = _write_input_csv(tmp_path, SENSOR_COLS)  # n_rows=4, seed=42
+        output_path = tmp_path / "scores.csv"
+
+        metadata = {
+            "frozen_threshold": 0.0,
+            "model_version": "test-v1",
+            "expected_sensors": SENSOR_COLS,
+        }
+        (tmp_path / "model_metadata.json").write_text(json.dumps(metadata))
+
+        result = batch_score.score_batch(model_path, input_path, output_path)
+
+        # frozen_threshold=0.0 flags every row; a 0.5 default would not.
+        assert (result["predicted_label"] == 1).all()
+        # Discriminating: at least one score is below 0.5, so a 0.5 default
+        # would have produced a 0 for that row.
+        assert (result["score"] < 0.5).any(), (
+            "Test fixture invalid: expected at least one score < 0.5 so that a "
+            "0.5 default would visibly differ from the 0.0 metadata threshold."
         )
 
     def test_no_sensor_columns_raises_value_error(self, tmp_path: Path) -> None:
