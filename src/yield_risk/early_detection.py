@@ -7,7 +7,7 @@ import json
 import math
 import warnings
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -32,7 +32,7 @@ from xgboost import XGBClassifier
 
 from yield_risk.config import CostMatrix
 from yield_risk.evaluate import compute_metrics
-from yield_risk.preprocess import SecomPreprocessor
+from yield_risk.preprocess import SecomPreprocessor, split_stratified
 from yield_risk.thresholding import expected_cost_at_threshold
 
 _VALID_ACCESS_TYPES = frozenset({"prefix", "window"})
@@ -1838,6 +1838,332 @@ def evaluate_fitted_early_detector(
         "n_features_selected": len(detector.preprocessor.selected_idx),
     }
 
+    sanitized = cast("dict[str, object]", _sanitize(result))
+    json.dumps(sanitized, allow_nan=False)
+    return sanitized
+
+
+def _raw_sensor_columns(df: pd.DataFrame) -> list[str]:
+    """Return ordered raw sensor columns from a SECOM-shaped frame."""
+    return [col for col in df.columns if col.startswith("sensor_")]
+
+
+def _require_mapping(value: object, name: str) -> Mapping[str, object]:
+    """Return ``value`` as a mapping or raise a clear configuration error."""
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{name} must be a mapping")
+    return cast("Mapping[str, object]", value)
+
+
+def _config_with_prefix(
+    cfg: HyperparamConfig,
+    prefix_end: int,
+) -> HyperparamConfig:
+    """Return ``cfg`` with only sensor access replaced by a prefix."""
+    return replace(
+        cfg,
+        access=SensorAccess(access_type="prefix", prefix_end=prefix_end),
+        model_params=dict(cfg.model_params),
+    )
+
+
+def _fit_evaluate_row(
+    x_train: pd.DataFrame,
+    y_train: np.ndarray,
+    x_test: pd.DataFrame,
+    y_test: np.ndarray,
+    raw_sensor_cols: list[str],
+    cfg: HyperparamConfig,
+    *,
+    role: str,
+    source: str,
+    inner_cv_folds: int,
+    random_seed: int,
+    cost_matrix: CostMatrix | None,
+) -> dict[str, object]:
+    """Fit one detector config and return a comparison/curve row."""
+    detector = fit_early_detector(
+        x_train,
+        y_train,
+        raw_sensor_cols,
+        cfg,
+        inner_cv_folds=inner_cv_folds,
+        random_seed=random_seed,
+    )
+    metrics = evaluate_fitted_early_detector(
+        detector,
+        x_test,
+        y_test,
+        cost_matrix=cost_matrix,
+    )
+    row: dict[str, object] = {
+        "model": cfg.model_family,
+        "role": role,
+        **metrics,
+        "source": source,
+    }
+    return row
+
+
+def _selected_tabular_comparison_row(
+    model_comparison_path: Path | None,
+    *,
+    n_sensors: int,
+) -> dict[str, object] | None:
+    """Load and map the selected full-feature tabular baseline row, if present."""
+    if model_comparison_path is None or not model_comparison_path.exists():
+        return None
+
+    parsed: object = json.loads(model_comparison_path.read_text(encoding="utf-8"))
+    if not isinstance(parsed, list):
+        return None
+
+    selected: Mapping[str, object] | None = None
+    for item in parsed:
+        if isinstance(item, Mapping) and bool(item.get("selected")):
+            selected = cast("Mapping[str, object]", item)
+            break
+
+    if selected is None:
+        return None
+
+    threshold = selected.get("threshold")
+    if threshold is None:
+        threshold = selected.get("frozen_threshold")
+
+    n_sensors_used = selected.get("n_sensors_used")
+    if n_sensors_used is None:
+        n_sensors_used = n_sensors
+
+    sensor_fraction = selected.get("sensor_fraction")
+    if sensor_fraction is None:
+        sensor_fraction = 1.0
+
+    tabular_latest_index = selected.get("latest_index")
+    if tabular_latest_index is None:
+        tabular_latest_index = n_sensors
+
+    return {
+        "model": selected.get("model"),
+        "role": "tabular_selected_model",
+        "test_pr_auc": selected.get("test_pr_auc"),
+        "test_roc_auc": selected.get("test_roc_auc"),
+        "test_precision": selected.get("test_precision"),
+        "test_recall": selected.get("test_recall"),
+        "test_f1": selected.get("test_f1"),
+        "test_balanced_accuracy": selected.get("test_balanced_accuracy"),
+        "test_false_alarm_rate": selected.get("test_false_alarm_rate"),
+        "expected_cost": selected.get("expected_cost"),
+        "threshold": threshold,
+        "confusion_matrix": selected.get("confusion_matrix"),
+        "n_sensors_used": n_sensors_used,
+        "sensor_fraction": sensor_fraction,
+        "latest_index": tabular_latest_index,
+        "source": str(model_comparison_path),
+    }
+
+
+def _finite_float(value: object) -> float | None:
+    """Return ``value`` as a finite float, or ``None`` if unavailable."""
+    if value is None:
+        return None
+    try:
+        result = float(cast("Any", value))
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _holdout_verdict(
+    early_row: Mapping[str, object],
+    baseline_rows: list[Mapping[str, object]],
+    *,
+    performance_tolerance: float,
+    n_sensors: int,
+) -> str:
+    """Return the early-vs-baseline verdict for comparison rows."""
+    baseline_scores = [
+        score
+        for row in baseline_rows
+        if (score := _finite_float(row.get("test_pr_auc"))) is not None
+    ]
+    if not baseline_scores:
+        return "no_baseline"
+
+    early_pr_auc = _finite_float(early_row.get("test_pr_auc"))
+    early_n_sensors = _finite_float(early_row.get("n_sensors_used"))
+    if early_pr_auc is None or early_n_sensors is None:
+        return "baseline_preferred"
+
+    baseline_pr_auc = max(baseline_scores)
+    tolerance_delta = performance_tolerance * baseline_pr_auc
+    if (
+        early_n_sensors < n_sensors
+        and early_pr_auc >= baseline_pr_auc - tolerance_delta
+    ):
+        return "early_model_competitive"
+    return "baseline_preferred"
+
+
+def _curve_prefixes(
+    ed_cfg: EarlyDetectionConfig,
+    best_cfg: HyperparamConfig,
+    *,
+    n_sensors: int,
+) -> list[int]:
+    """Return unique sorted valid prefix lengths for the diagnostic curve."""
+    requested = [
+        *ed_cfg.curve_prefixes,
+        latest_index(best_cfg.access, n_sensors),
+        n_sensors,
+    ]
+    prefixes = sorted(
+        {int(prefix) for prefix in requested if 1 <= int(prefix) <= n_sensors}
+    )
+    if not prefixes:
+        raise ValueError("No valid early-detection curve prefixes")
+    return prefixes
+
+
+def evaluate_best_on_holdout(
+    df: pd.DataFrame,
+    best_record: Mapping[str, object],
+    ed_cfg: EarlyDetectionConfig,
+    cost_matrix: CostMatrix | None,
+    *,
+    model_comparison_path: Path | None = None,
+) -> dict[str, object]:
+    """Evaluate the winning early-detection config on the recorded holdout.
+
+    Reconstructs the train/test split from ``best_record["provenance"]``,
+    evaluates the winning early config, evaluates the same non-access settings
+    with full-prefix access, optionally maps the selected row from an existing
+    tabular model-comparison artifact, and builds diagnostic curve rows. This
+    helper performs no file writes and produces a JSON-safe dictionary suitable
+    for downstream artifact writers.
+
+    Args:
+        df: Raw SECOM-shaped data with ``sensor_*`` columns and ``label``.
+        best_record: Loaded ``early_detection_best.json`` record.
+        ed_cfg: Early-detection configuration containing tolerance and curve
+            settings.
+        cost_matrix: Optional cost matrix for expected-cost metrics.
+        model_comparison_path: Optional path to ``reports/model_comparison.json``.
+
+    Returns:
+        JSON-safe dictionary containing comparison rows, curve rows, metadata,
+        and verdict.
+
+    Raises:
+        ValueError: If the best record is infeasible, raw sensor columns are
+            missing, recorded sensor count mismatches the data, curve prefixes
+            are empty after validation, or lower-level fit/evaluation guards
+            fail.
+    """
+    if best_record.get("feasible") is False:
+        raise ValueError("Cannot evaluate an infeasible early-detection best trial")
+
+    raw_sensor_cols = _raw_sensor_columns(df)
+    if not raw_sensor_cols:
+        raise ValueError("No raw sensor_ columns found")
+
+    provenance = _require_mapping(best_record.get("provenance"), "provenance")
+    n_sensors = len(raw_sensor_cols)
+    recorded_n_sensors = int(cast("Any", provenance["n_sensors"]))
+    if recorded_n_sensors != n_sensors:
+        raise ValueError("early_detection_best.json n_sensors does not match data")
+
+    test_size = float(cast("Any", provenance["test_size"]))
+    random_seed = int(cast("Any", provenance["random_seed"]))
+    train_df, test_df = split_stratified(
+        df,
+        test_size=test_size,
+        random_seed=random_seed,
+    )
+    y_train = train_df["label"].to_numpy(dtype=int)
+    y_test = test_df["label"].to_numpy(dtype=int)
+
+    config_record = _require_mapping(best_record.get("config"), "config")
+    best_cfg = hyperparam_config_from_dict(config_record)
+    source = "early_detection_best.json"
+
+    early_row = _fit_evaluate_row(
+        train_df,
+        y_train,
+        test_df,
+        y_test,
+        raw_sensor_cols,
+        best_cfg,
+        role="early_optuna_best",
+        source=source,
+        inner_cv_folds=ed_cfg.inner_cv_folds,
+        random_seed=random_seed,
+        cost_matrix=cost_matrix,
+    )
+
+    full_cfg = _config_with_prefix(best_cfg, n_sensors)
+    full_row = _fit_evaluate_row(
+        train_df,
+        y_train,
+        test_df,
+        y_test,
+        raw_sensor_cols,
+        full_cfg,
+        role="full_prefix_same_config",
+        source=source,
+        inner_cv_folds=ed_cfg.inner_cv_folds,
+        random_seed=random_seed,
+        cost_matrix=cost_matrix,
+    )
+
+    comparison_rows: list[dict[str, object]] = [early_row, full_row]
+    tabular_row = _selected_tabular_comparison_row(
+        model_comparison_path,
+        n_sensors=n_sensors,
+    )
+    if tabular_row is not None:
+        comparison_rows.append(tabular_row)
+
+    curve_rows: list[dict[str, object]] = []
+    for prefix_end in _curve_prefixes(ed_cfg, best_cfg, n_sensors=n_sensors):
+        curve_cfg = _config_with_prefix(best_cfg, prefix_end)
+        curve_rows.append(
+            _fit_evaluate_row(
+                train_df,
+                y_train,
+                test_df,
+                y_test,
+                raw_sensor_cols,
+                curve_cfg,
+                role="early_detection_curve",
+                source=source,
+                inner_cv_folds=ed_cfg.inner_cv_folds,
+                random_seed=random_seed,
+                cost_matrix=cost_matrix,
+            )
+        )
+
+    baseline_rows: list[Mapping[str, object]] = [full_row]
+    if tabular_row is not None:
+        baseline_rows.append(tabular_row)
+
+    verdict = _holdout_verdict(
+        early_row,
+        baseline_rows,
+        performance_tolerance=ed_cfg.performance_tolerance,
+        n_sensors=n_sensors,
+    )
+
+    result: dict[str, object] = {
+        "primary_metric": "test_pr_auc",
+        "performance_tolerance": ed_cfg.performance_tolerance,
+        "sensor_count": n_sensors,
+        "test_size": test_size,
+        "random_seed": random_seed,
+        "verdict": verdict,
+        "comparison_rows": comparison_rows,
+        "curve_rows": curve_rows,
+    }
     sanitized = cast("dict[str, object]", _sanitize(result))
     json.dumps(sanitized, allow_nan=False)
     return sanitized

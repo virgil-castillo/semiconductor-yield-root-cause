@@ -3400,6 +3400,373 @@ def test_evaluate_fitted_early_detector_one_column_proba_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Holdout comparison orchestration
+# ---------------------------------------------------------------------------
+
+
+def _make_holdout_df(
+    *,
+    n_rows: int = 80,
+    n_sensors: int = 5,
+    early_signal: bool = True,
+    seed: int = 321,
+) -> pd.DataFrame:
+    """Return a SECOM-shaped DataFrame for holdout orchestration tests.
+
+    Args:
+        n_rows: Number of rows to generate.
+        n_sensors: Number of raw ``sensor_*`` columns.
+        early_signal: Whether the first sensor should be strongly predictive.
+            When false, a later sensor is strongly predictive instead.
+        seed: Random-number seed.
+
+    Returns:
+        DataFrame containing ``timestamp``, ordered sensor columns, and
+        binary ``label``.
+    """
+    rng = np.random.default_rng(seed)
+    y = np.array([0, 1] * (n_rows // 2), dtype=int)
+    data: dict[str, object] = {"timestamp": list(range(n_rows))}
+    for i in range(n_sensors):
+        signal = 0.0
+        if early_signal and i == 0:
+            signal = 3.0
+        if not early_signal and i == n_sensors - 1:
+            signal = 4.0
+        data[f"sensor_{i:03d}"] = rng.standard_normal(n_rows) + y * signal
+    data["label"] = y
+    return pd.DataFrame(data)
+
+
+def _make_holdout_ed_cfg(
+    *,
+    curve_prefixes: list[int] | None = None,
+    performance_tolerance: float = 0.05,
+) -> EarlyDetectionConfig:
+    """Return a compact early-detection config for holdout tests.
+
+    Args:
+        curve_prefixes: Prefixes to request for the diagnostic curve.
+        performance_tolerance: Fractional PR-AUC tolerance for the verdict.
+
+    Returns:
+        Early-detection configuration with fast logistic-regression settings.
+    """
+    return EarlyDetectionConfig(
+        n_trials=1,
+        sampler_seed=0,
+        inner_cv_folds=2,
+        detection_metric="pr_auc",
+        alpha=0.1,
+        access_types=["prefix"],
+        min_window_size=1,
+        max_window_size=5,
+        model_families=["logistic_regression"],
+        missing_threshold=(0.9, 0.9),
+        cv_threshold=(0.0, 0.0),
+        correlation_threshold=(1.0, 1.0),
+        selection_methods=["none"],
+        max_features=(1, 5),
+        threshold_policy="tune",
+        threshold_range=(0.5, 0.5),
+        false_alarm_rate=0.1,
+        performance_tolerance=performance_tolerance,
+        curve_prefixes=[] if curve_prefixes is None else curve_prefixes,
+    )
+
+
+def _make_holdout_best_record(
+    *,
+    n_sensors: int = 5,
+    prefix_end: int = 2,
+    feasible: bool = True,
+    test_size: float = 0.25,
+    random_seed: int = 7,
+) -> dict[str, object]:
+    """Return a minimal serialized best-trial record for holdout tests.
+
+    Args:
+        n_sensors: Raw sensor count recorded in provenance.
+        prefix_end: Winning early prefix length.
+        feasible: Serialized trial feasibility flag.
+        test_size: Holdout size recorded in provenance.
+        random_seed: Split seed recorded in provenance.
+
+    Returns:
+        Best-record mapping shaped like ``early_detection_best.json``.
+    """
+    from yield_risk.early_detection import hyperparam_config_to_dict
+
+    cfg = HyperparamConfig(
+        access=SensorAccess(access_type="prefix", prefix_end=prefix_end),
+        missing_threshold=0.9,
+        cv_threshold=0.0,
+        correlation_threshold=1.0,
+        selection_method="none",
+        max_features=None,
+        model_family="logistic_regression",
+        model_params={},
+        threshold_policy="tune",
+        threshold=0.5,
+        false_alarm_rate=None,
+    )
+    return {
+        "best_trial_number": 0,
+        "penalized_score": 0.1,
+        "detection_metric": 0.2,
+        "observation_fraction": prefix_end / n_sensors,
+        "n_features_selected": float(prefix_end),
+        "feasible": feasible,
+        "latest_index": prefix_end,
+        "config": hyperparam_config_to_dict(cfg),
+        "provenance": {
+            "n_sensors": n_sensors,
+            "n_trials": 1,
+            "sampler_seed": 0,
+            "inner_cv_folds": 2,
+            "detection_metric": "pr_auc",
+            "alpha": 0.1,
+            "threshold_policy": "tune",
+            "test_size": test_size,
+            "random_seed": random_seed,
+        },
+    }
+
+
+def _holdout_cost_matrix() -> object:
+    """Return a finite cost matrix for holdout orchestration tests.
+
+    Returns:
+        Cost matrix object accepted by early-detection evaluators.
+    """
+    from yield_risk.config import CostMatrix
+
+    return CostMatrix(
+        true_pass=0.0,
+        true_fail=0.0,
+        false_fail=1.0,
+        false_pass=10.0,
+    )
+
+
+def test_comparison_schema_includes_early_full_tabular_rows(
+    tmp_path: Path,
+) -> None:
+    """evaluate_best_on_holdout returns required comparison row fields."""
+    from yield_risk.early_detection import evaluate_best_on_holdout
+
+    model_comparison_path = tmp_path / "model_comparison.json"
+    model_comparison_path.write_text(
+        json.dumps(
+            [
+                {
+                    "model": "logistic_regression",
+                    "test_pr_auc": 0.2,
+                    "selected": False,
+                },
+                {
+                    "model": "random_forest",
+                    "test_pr_auc": 0.91,
+                    "test_roc_auc": 0.88,
+                    "test_precision": 0.31,
+                    "test_recall": 0.72,
+                    "frozen_threshold": 0.14,
+                    "expected_cost": 83.0,
+                    "selected": True,
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = evaluate_best_on_holdout(
+        _make_holdout_df(),
+        _make_holdout_best_record(prefix_end=2),
+        _make_holdout_ed_cfg(curve_prefixes=[1]),
+        _holdout_cost_matrix(),
+        model_comparison_path=model_comparison_path,
+    )
+
+    json.dumps(result, allow_nan=False)
+    assert result["primary_metric"] == "test_pr_auc"
+    assert result["performance_tolerance"] == pytest.approx(0.05)
+    assert result["sensor_count"] == 5
+    assert result["test_size"] == pytest.approx(0.25)
+    assert result["random_seed"] == 7
+
+    comparison_rows = result["comparison_rows"]
+    assert isinstance(comparison_rows, list)
+    by_role = {row["role"]: row for row in comparison_rows}
+    assert set(by_role) == {
+        "early_optuna_best",
+        "full_prefix_same_config",
+        "tabular_selected_model",
+    }
+
+    required_fields = {
+        "model",
+        "role",
+        "test_pr_auc",
+        "test_roc_auc",
+        "test_precision",
+        "test_recall",
+        "test_f1",
+        "test_balanced_accuracy",
+        "test_false_alarm_rate",
+        "expected_cost",
+        "threshold",
+        "confusion_matrix",
+        "n_sensors_used",
+        "sensor_fraction",
+        "latest_index",
+        "source",
+    }
+    for row in comparison_rows:
+        assert required_fields <= row.keys()
+
+    early_row = by_role["early_optuna_best"]
+    assert early_row["n_sensors_used"] == 2
+    assert early_row["sensor_fraction"] == pytest.approx(2 / 5)
+    assert early_row["latest_index"] == 2
+
+    full_row = by_role["full_prefix_same_config"]
+    assert full_row["n_sensors_used"] == 5
+    assert full_row["sensor_fraction"] == pytest.approx(1.0)
+    assert full_row["latest_index"] == 5
+
+    tabular_row = by_role["tabular_selected_model"]
+    assert tabular_row["model"] == "random_forest"
+    assert tabular_row["threshold"] == pytest.approx(0.14)
+    assert tabular_row["test_f1"] is None
+    assert tabular_row["test_balanced_accuracy"] is None
+    assert tabular_row["test_false_alarm_rate"] is None
+    assert tabular_row["confusion_matrix"] is None
+    assert tabular_row["n_sensors_used"] == 5
+    assert tabular_row["sensor_fraction"] == pytest.approx(1.0)
+    assert tabular_row["latest_index"] == 5
+    assert tabular_row["source"] == str(model_comparison_path)
+
+
+def test_verdict_marks_competitive_early_model() -> None:
+    """evaluate_best_on_holdout chooses the competitive early verdict."""
+    from yield_risk.early_detection import evaluate_best_on_holdout
+
+    result = evaluate_best_on_holdout(
+        _make_holdout_df(early_signal=True),
+        _make_holdout_best_record(prefix_end=1),
+        _make_holdout_ed_cfg(curve_prefixes=[1], performance_tolerance=0.10),
+        _holdout_cost_matrix(),
+    )
+
+    assert result["verdict"] == "early_model_competitive"
+
+
+def test_verdict_prefers_baseline_when_early_model_lags() -> None:
+    """evaluate_best_on_holdout chooses baseline_preferred for weak early data."""
+    from yield_risk.early_detection import evaluate_best_on_holdout
+
+    result = evaluate_best_on_holdout(
+        _make_holdout_df(early_signal=False),
+        _make_holdout_best_record(prefix_end=1),
+        _make_holdout_ed_cfg(curve_prefixes=[1], performance_tolerance=0.05),
+        _holdout_cost_matrix(),
+    )
+
+    assert result["verdict"] == "baseline_preferred"
+
+
+def test_curve_prefix_rows_use_unique_sorted_valid_prefixes() -> None:
+    """evaluate_best_on_holdout normalizes diagnostic curve prefixes."""
+    from yield_risk.early_detection import evaluate_best_on_holdout
+
+    result = evaluate_best_on_holdout(
+        _make_holdout_df(),
+        _make_holdout_best_record(prefix_end=3),
+        _make_holdout_ed_cfg(curve_prefixes=[0, 2, 2, 10, -1]),
+        _holdout_cost_matrix(),
+    )
+
+    curve_rows = result["curve_rows"]
+    assert isinstance(curve_rows, list)
+    assert [row["latest_index"] for row in curve_rows] == [2, 3, 5]
+    assert [row["n_sensors_used"] for row in curve_rows] == [2, 3, 5]
+    assert {row["role"] for row in curve_rows} == {"early_detection_curve"}
+
+
+def test_evaluate_best_on_holdout_rejects_infeasible_best_trial() -> None:
+    """evaluate_best_on_holdout rejects serialized infeasible winners."""
+    from yield_risk.early_detection import evaluate_best_on_holdout
+
+    with pytest.raises(
+        ValueError, match="Cannot evaluate an infeasible early-detection best trial"
+    ):
+        evaluate_best_on_holdout(
+            _make_holdout_df(),
+            _make_holdout_best_record(feasible=False),
+            _make_holdout_ed_cfg(curve_prefixes=[1]),
+            _holdout_cost_matrix(),
+        )
+
+
+def test_evaluate_best_on_holdout_rejects_sensor_count_mismatch() -> None:
+    """evaluate_best_on_holdout rejects stale best-record sensor counts."""
+    from yield_risk.early_detection import evaluate_best_on_holdout
+
+    with pytest.raises(
+        ValueError, match="early_detection_best.json n_sensors does not match data"
+    ):
+        evaluate_best_on_holdout(
+            _make_holdout_df(n_sensors=5),
+            _make_holdout_best_record(n_sensors=6),
+            _make_holdout_ed_cfg(curve_prefixes=[1]),
+            _holdout_cost_matrix(),
+        )
+
+
+def test_evaluate_best_on_holdout_sanitizes_json_result(
+    tmp_path: Path,
+) -> None:
+    """evaluate_best_on_holdout strips non-finite values from its result."""
+    from yield_risk.config import CostMatrix
+    from yield_risk.early_detection import evaluate_best_on_holdout
+
+    model_comparison_path = tmp_path / "model_comparison.json"
+    model_comparison_path.write_text(
+        json.dumps(
+            [
+                {
+                    "model": "random_forest",
+                    "test_pr_auc": 0.91,
+                    "test_f1": float("nan"),
+                    "selected": True,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = evaluate_best_on_holdout(
+        _make_holdout_df(),
+        _make_holdout_best_record(prefix_end=2),
+        _make_holdout_ed_cfg(curve_prefixes=[1]),
+        CostMatrix(
+            true_pass=float("inf"),
+            true_fail=float("inf"),
+            false_fail=float("inf"),
+            false_pass=float("inf"),
+        ),
+        model_comparison_path=model_comparison_path,
+    )
+
+    json.dumps(result, allow_nan=False)
+    tabular_rows = [
+        row for row in result["comparison_rows"]
+        if row["role"] == "tabular_selected_model"
+    ]
+    assert tabular_rows[0]["test_f1"] is None
+
+
+# ---------------------------------------------------------------------------
 # CLI tests — run_early_detection.py  (Spec §5 / §6)
 # ---------------------------------------------------------------------------
 
