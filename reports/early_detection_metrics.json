@@ -1,0 +1,80 @@
+{
+  "primary_metric": "test_pr_auc",
+  "verdict": "baseline_preferred",
+  "comparison_rows": [
+    {
+      "model": "random_forest",
+      "role": "early_optuna_best",
+      "test_pr_auc": 0.19472010466454664,
+      "test_roc_auc": 0.7590909090909091,
+      "test_precision": 0.14457831325301204,
+      "test_recall": 0.75,
+      "test_f1": 0.24242424242424243,
+      "test_balanced_accuracy": 0.7136363636363636,
+      "test_false_alarm_rate": 0.32272727272727275,
+      "expected_cost": null,
+      "threshold": 0.2171299206877838,
+      "confusion_matrix": [
+        [
+          149,
+          71
+        ],
+        [
+          4,
+          12
+        ]
+      ],
+      "n_sensors_used": 155,
+      "sensor_fraction": 0.2627118644067797,
+      "latest_index": 155,
+      "n_features_selected": 73,
+      "source": "early_detection_best.json"
+    },
+    {
+      "model": "random_forest",
+      "role": "full_prefix_same_config",
+      "test_pr_auc": 0.22167590153069358,
+      "test_roc_auc": 0.7588068181818182,
+      "test_precision": 0.1388888888888889,
+      "test_recall": 0.625,
+      "test_f1": 0.22727272727272727,
+      "test_balanced_accuracy": 0.6715909090909091,
+      "test_false_alarm_rate": 0.2818181818181818,
+      "expected_cost": null,
+      "threshold": 0.2171299206877838,
+      "confusion_matrix": [
+        [
+          158,
+          62
+        ],
+        [
+          6,
+          10
+        ]
+      ],
+      "n_sensors_used": 590,
+      "sensor_fraction": 1.0,
+      "latest_index": 590,
+      "n_features_selected": 198,
+      "source": "early_detection_best.json"
+    },
+    {
+      "model": "random_forest",
+      "role": "tabular_selected_model",
+      "test_pr_auc": 0.22162433465097206,
+      "test_roc_auc": 0.7926136363636364,
+      "test_precision": 0.19696969696969696,
+      "test_recall": 0.8125,
+      "test_f1": null,
+      "test_balanced_accuracy": null,
+      "test_false_alarm_rate": null,
+      "expected_cost": 83.0,
+      "threshold": 0.14,
+      "confusion_matrix": null,
+      "n_sensors_used": 590,
+      "sensor_fraction": 1.0,
+      "latest_index": 590,
+      "source": "reports\\model_comparison.json"
+    }
+  ]
+}

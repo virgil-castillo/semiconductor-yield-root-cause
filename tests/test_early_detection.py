@@ -3866,6 +3866,160 @@ def _write_minimal_ed_yaml(tmp_path: Path) -> Path:
     return yaml_path
 
 
+def _fake_best_record_for_cli() -> dict[str, object]:
+    """Return a minimal best-record payload for CLI orchestration tests.
+
+    Returns:
+        JSON-safe best-record mapping with provenance required by the CLI.
+    """
+    return {
+        "best_trial_number": 1,
+        "penalized_score": 0.12,
+        "detection_metric": 0.2,
+        "observation_fraction": 0.5,
+        "n_features_selected": 2.0,
+        "feasible": True,
+        "latest_index": 3,
+        "config": {"model_family": "random_forest"},
+        "provenance": {
+            "n_sensors": 6,
+            "n_trials": 2,
+            "sampler_seed": 0,
+            "inner_cv_folds": 2,
+            "detection_metric": "pr_auc",
+            "alpha": 0.1,
+            "threshold_policy": "tune",
+            "test_size": 0.2,
+            "random_seed": 0,
+        },
+    }
+
+
+def _fake_holdout_result() -> dict[str, object]:
+    """Return a JSON-safe holdout result shaped like Spec C output.
+
+    Returns:
+        Result mapping with comparison rows and diagnostic curve rows.
+    """
+    required_base: dict[str, object] = {
+        "test_roc_auc": 0.7,
+        "test_precision": 0.3,
+        "test_recall": 0.4,
+        "test_f1": 0.34,
+        "test_balanced_accuracy": 0.6,
+        "test_false_alarm_rate": 0.2,
+        "expected_cost": 10.0,
+        "threshold": 0.25,
+        "confusion_matrix": [[8, 2], [3, 4]],
+        "source": "early_detection_best.json",
+    }
+    early_row = {
+        **required_base,
+        "model": "random_forest",
+        "role": "early_optuna_best",
+        "test_pr_auc": 0.21,
+        "n_sensors_used": 3,
+        "sensor_fraction": 0.5,
+        "latest_index": 3,
+    }
+    full_row = {
+        **required_base,
+        "model": "random_forest",
+        "role": "full_prefix_same_config",
+        "test_pr_auc": 0.23,
+        "n_sensors_used": 6,
+        "sensor_fraction": 1.0,
+        "latest_index": 6,
+    }
+    tabular_row = {
+        **required_base,
+        "model": "xgboost",
+        "role": "tabular_selected_model",
+        "test_pr_auc": 0.22,
+        "n_sensors_used": 6,
+        "sensor_fraction": 1.0,
+        "latest_index": 6,
+        "source": "reports/model_comparison.json",
+    }
+    curve_rows = [
+        {
+            **required_base,
+            "model": "random_forest",
+            "role": "early_detection_curve",
+            "test_pr_auc": 0.18,
+            "n_sensors_used": 1,
+            "sensor_fraction": 1 / 6,
+            "latest_index": 1,
+        },
+        {
+            **required_base,
+            "model": "random_forest",
+            "role": "early_detection_curve",
+            "test_pr_auc": 0.21,
+            "n_sensors_used": 3,
+            "sensor_fraction": 0.5,
+            "latest_index": 3,
+        },
+        {
+            **required_base,
+            "model": "random_forest",
+            "role": "early_detection_curve",
+            "test_pr_auc": 0.23,
+            "n_sensors_used": 6,
+            "sensor_fraction": 1.0,
+            "latest_index": 6,
+        },
+    ]
+    return {
+        "primary_metric": "test_pr_auc",
+        "performance_tolerance": 0.05,
+        "sensor_count": 6,
+        "test_size": 0.2,
+        "random_seed": 0,
+        "verdict": "baseline_preferred",
+        "comparison_rows": [early_row, full_row, tabular_row],
+        "curve_rows": curve_rows,
+    }
+
+
+class _FakeTrial:
+    """Small Optuna-trial stand-in for CLI orchestration tests."""
+
+    number = 1
+    user_attrs = {"model_family": "random_forest"}
+
+
+class _FakeStudy:
+    """Small Optuna-study stand-in for CLI orchestration tests."""
+
+    best_trial = _FakeTrial()
+
+    def trials_dataframe(self) -> pd.DataFrame:
+        """Return one fake completed-trial row.
+
+        Returns:
+            DataFrame shaped like an Optuna trials export.
+        """
+        return pd.DataFrame({"number": [1], "value": [0.12]})
+
+
+def _assert_spec_c_artifacts_exist(
+    reports_dir: Path,
+    figures_dir: Path,
+) -> None:
+    """Assert all namespaced Spec C artifacts exist.
+
+    Args:
+        reports_dir: Configured reports directory.
+        figures_dir: Configured figures directory.
+    """
+    assert (reports_dir / "early_detection_metrics.json").exists()
+    assert (reports_dir / "early_detection_comparison.json").exists()
+    assert (reports_dir / "early_detection_comparison.csv").exists()
+    assert (reports_dir / "early_detection_curve.csv").exists()
+    assert (figures_dir / "early_detection_curve.png").exists()
+
+
 # ---------------------------------------------------------------------------
 # Test: _build_overrides only includes user-supplied flags
 # ---------------------------------------------------------------------------
@@ -3909,6 +4063,230 @@ def test_build_overrides_seed_maps_to_sampler_seed() -> None:
     overrides = mod._build_overrides(args)
 
     assert overrides.get("sampler_seed") == 99
+
+
+# ---------------------------------------------------------------------------
+# Tests: Spec C artifact writing and --evaluate-existing
+# ---------------------------------------------------------------------------
+
+
+def test_spec_c_artifact_writer_outputs_documented_schema(tmp_path: Path) -> None:
+    """Spec C writer emits JSON, CSV, curve CSV, and PNG under configured paths."""
+    mod = _load_cli()
+    reports_dir = tmp_path / "reports"
+    figures_dir = tmp_path / "figures"
+
+    mod._write_spec_c_artifacts(_fake_holdout_result(), reports_dir, figures_dir)
+
+    _assert_spec_c_artifacts_exist(reports_dir, figures_dir)
+    comparison = json.loads(
+        (reports_dir / "early_detection_comparison.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert comparison["primary_metric"] == "test_pr_auc"
+    assert comparison["verdict"] == "baseline_preferred"
+    assert {row["role"] for row in comparison["comparison_rows"]} == {
+        "early_optuna_best",
+        "full_prefix_same_config",
+        "tabular_selected_model",
+    }
+
+    comparison_csv = pd.read_csv(reports_dir / "early_detection_comparison.csv")
+    required_columns = {
+        "model",
+        "role",
+        "test_pr_auc",
+        "test_roc_auc",
+        "test_precision",
+        "test_recall",
+        "test_f1",
+        "test_balanced_accuracy",
+        "test_false_alarm_rate",
+        "expected_cost",
+        "threshold",
+        "confusion_matrix",
+        "n_sensors_used",
+        "sensor_fraction",
+        "latest_index",
+        "source",
+    }
+    assert required_columns <= set(comparison_csv.columns)
+    assert set(comparison_csv["role"]) == {
+        "early_optuna_best",
+        "full_prefix_same_config",
+        "tabular_selected_model",
+    }
+
+    curve_csv = pd.read_csv(reports_dir / "early_detection_curve.csv")
+    assert list(curve_csv["latest_index"]) == [1, 3, 6]
+    png_bytes = (figures_dir / "early_detection_curve.png").read_bytes()
+    assert png_bytes.startswith(b"\x89PNG")
+
+
+def test_evaluate_existing_skips_optuna_and_writes_spec_c_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--evaluate-existing loads best.json, skips study artifacts, and writes Spec C."""
+    mod = _load_cli()
+    df = _tiny_secom()
+    fake_cfg = _fake_config(tmp_path)
+    yaml_path = _write_minimal_ed_yaml(tmp_path)
+    fake_cfg.paths.models_dir.mkdir(parents=True)
+    best_path = fake_cfg.paths.models_dir / "early_detection_best.json"
+    best_payload = _fake_best_record_for_cli()
+    best_path.write_text(json.dumps(best_payload), encoding="utf-8")
+
+    monkeypatch.setattr(mod, "load_config", lambda: fake_cfg)
+    monkeypatch.setattr(mod, "load_secom", lambda raw_dir: df)
+    monkeypatch.setattr(mod, "validate_secom", lambda df_: None)
+    monkeypatch.setattr(
+        mod,
+        "run_study",
+        lambda *args, **kwargs: pytest.fail("run_study should be skipped"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "build_best_record",
+        lambda *args, **kwargs: pytest.fail("build_best_record should be skipped"),
+    )
+    monkeypatch.setattr(
+        mod.joblib,
+        "dump",
+        lambda *args, **kwargs: pytest.fail("study dump should be skipped"),
+    )
+
+    calls: list[Path | None] = []
+
+    def fake_evaluate_best_on_holdout(
+        df_: pd.DataFrame,
+        best_record: dict[str, object],
+        ed_cfg: EarlyDetectionConfig,
+        cost_matrix: object,
+        *,
+        model_comparison_path: Path | None = None,
+    ) -> dict[str, object]:
+        """Record the model-comparison path and return fake Spec C results."""
+        assert df_ is df
+        assert best_record == best_payload
+        assert ed_cfg.n_trials == 2
+        assert cost_matrix is None
+        calls.append(model_comparison_path)
+        return _fake_holdout_result()
+
+    monkeypatch.setattr(
+        mod,
+        "evaluate_best_on_holdout",
+        fake_evaluate_best_on_holdout,
+        raising=False,
+    )
+
+    mod.main(["--config", str(yaml_path), "--evaluate-existing"])
+
+    assert calls == [fake_cfg.paths.reports_dir / "model_comparison.json"]
+    _assert_spec_c_artifacts_exist(
+        fake_cfg.paths.reports_dir,
+        fake_cfg.paths.figures_dir,
+    )
+    assert not (fake_cfg.paths.models_dir / "early_detection_study.pkl").exists()
+    assert not (fake_cfg.paths.reports_dir / "early_detection_trials.csv").exists()
+
+
+def test_evaluate_existing_missing_best_raises_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--evaluate-existing raises FileNotFoundError mentioning best.json path."""
+    mod = _load_cli()
+    fake_cfg = _fake_config(tmp_path)
+    yaml_path = _write_minimal_ed_yaml(tmp_path)
+
+    monkeypatch.setattr(mod, "load_config", lambda: fake_cfg)
+    monkeypatch.setattr(
+        mod,
+        "load_secom",
+        lambda raw_dir: pytest.fail("best artifact should be checked first"),
+    )
+    monkeypatch.setattr(mod, "validate_secom", lambda df_: None)
+    monkeypatch.setattr(
+        mod,
+        "run_study",
+        lambda *args, **kwargs: pytest.fail("run_study should be skipped"),
+    )
+
+    expected_path = fake_cfg.paths.models_dir / "early_detection_best.json"
+    match_path = str(expected_path).replace("\\", "\\\\")
+    with pytest.raises(FileNotFoundError, match=match_path):
+        mod.main(["--config", str(yaml_path), "--evaluate-existing"])
+
+
+def test_default_path_runs_study_and_writes_spec_c_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default CLI path writes Spec B artifacts, then evaluates and writes Spec C."""
+    mod = _load_cli()
+    df = _tiny_secom()
+    fake_cfg = _fake_config(tmp_path)
+    yaml_path = _write_minimal_ed_yaml(tmp_path)
+    best_payload = _fake_best_record_for_cli()
+
+    monkeypatch.setattr(mod, "load_config", lambda: fake_cfg)
+    monkeypatch.setattr(mod, "load_secom", lambda raw_dir: df)
+    monkeypatch.setattr(mod, "validate_secom", lambda df_: None)
+
+    study_calls = 0
+
+    def fake_run_study(*args: object, **kwargs: object) -> _FakeStudy:
+        """Return a fake study and record that the study path executed."""
+        nonlocal study_calls
+        study_calls += 1
+        return _FakeStudy()
+
+    dump_calls: list[Path] = []
+
+    def fake_dump(study: _FakeStudy, path: Path) -> None:
+        """Write a placeholder study file."""
+        dump_calls.append(path)
+        path.write_text("study", encoding="utf-8")
+
+    eval_calls: list[Path | None] = []
+
+    def fake_evaluate_best_on_holdout(
+        df_: pd.DataFrame,
+        best_record: dict[str, object],
+        ed_cfg: EarlyDetectionConfig,
+        cost_matrix: object,
+        *,
+        model_comparison_path: Path | None = None,
+    ) -> dict[str, object]:
+        """Record the model-comparison path and return fake Spec C results."""
+        assert df_ is df
+        assert best_record == best_payload
+        assert ed_cfg.n_trials == 2
+        assert cost_matrix is None
+        eval_calls.append(model_comparison_path)
+        return _fake_holdout_result()
+
+    monkeypatch.setattr(mod, "run_study", fake_run_study)
+    monkeypatch.setattr(mod.joblib, "dump", fake_dump)
+    monkeypatch.setattr(mod, "build_best_record", lambda *args, **kwargs: best_payload)
+    monkeypatch.setattr(
+        mod,
+        "evaluate_best_on_holdout",
+        fake_evaluate_best_on_holdout,
+        raising=False,
+    )
+
+    mod.main(["--config", str(yaml_path), "--n-trials", "2"])
+
+    assert study_calls == 1
+    assert dump_calls == [fake_cfg.paths.models_dir / "early_detection_study.pkl"]
+    assert eval_calls == [fake_cfg.paths.reports_dir / "model_comparison.json"]
+    assert (fake_cfg.paths.models_dir / "early_detection_best.json").exists()
+    assert (fake_cfg.paths.reports_dir / "early_detection_trials.csv").exists()
+    _assert_spec_c_artifacts_exist(
+        fake_cfg.paths.reports_dir,
+        fake_cfg.paths.figures_dir,
+    )
 
 
 # ---------------------------------------------------------------------------

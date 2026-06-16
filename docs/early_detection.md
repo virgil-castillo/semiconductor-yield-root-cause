@@ -1,11 +1,11 @@
 # Early Detection Study
 
-Generated: 2026-06-16
+Generated: 2026-06-17
 
 ## Status
 
-The Optuna study is finished. Both persisted artifacts agree that all configured
-trials completed:
+The Optuna study is finished and the held-out Spec C comparison has been run
+from the persisted 100-trial best record.
 
 | Source | Trial count | State summary |
 | --- | ---: | --- |
@@ -14,15 +14,18 @@ trials completed:
 
 The configured study size is `n_trials: 100` in
 `configs/early_detection_config.yaml`, so the run reached the expected count.
+The held-out evaluation was generated with:
+
+```powershell
+python scripts\run_early_detection.py --evaluate-existing
+```
 
 ## Scope
 
 This document is the human-facing usage and interpretation report described by
-the early-detection design docs. The current implementation corresponds to the
-Optuna study slice: it writes the study, best-trial handoff record, and trials
-table. The held-out test evaluation, full-feature baseline comparison, and
-early-detection curve are deferred to the comparison slice and are not present in
-this artifact set.
+the early-detection design docs. The current artifact set includes the Optuna
+study handoff artifacts plus the held-out comparison, comparison CSV, diagnostic
+prefix curve CSV, and curve figure.
 
 ## Method
 
@@ -47,8 +50,9 @@ Key run settings:
 | Primary detection metric | `pr_auc` |
 | Earliness penalty alpha | 0.10 |
 | Threshold policy | `tune` |
-| Outer test split | 15%, held out and not evaluated in this slice |
+| Outer test split | 15%, held out until Spec C evaluation |
 | Sensor count | 590 |
+| Performance tolerance | 5% of the best full-sensor PR-AUC |
 
 The search space includes prefix or contiguous-window sensor access,
 missingness/CV/correlation preprocessing thresholds, optional feature
@@ -63,12 +67,11 @@ affect the trial score because PR-AUC is threshold-free.
 | `models/early_detection_study.pkl` | Serialized Optuna study |
 | `models/early_detection_best.json` | Best-trial config and provenance |
 | `reports/early_detection_trials.csv` | Full Optuna trials dataframe |
-
-Deferred comparison artifacts expected by the umbrella design are not available
-yet: `reports/early_detection_metrics.json`,
-`reports/early_detection_comparison.json`,
-`reports/early_detection_comparison.csv`, and
-`reports/figures/early_detection_curve.png`.
+| `reports/early_detection_metrics.json` | Held-out comparison metric rows |
+| `reports/early_detection_comparison.json` | Held-out comparison metadata, rows, curve rows, and verdict |
+| `reports/early_detection_comparison.csv` | Held-out comparison rows |
+| `reports/early_detection_curve.csv` | Diagnostic prefix sweep rows |
+| `reports/figures/early_detection_curve.png` | Held-out PR-AUC curve by prefix length |
 
 ## Best Trial
 
@@ -100,6 +103,54 @@ Best configuration:
 | Random forest `min_samples_leaf` | 13 |
 | Random forest `max_features` | sqrt |
 | Random forest `class_weight` | balanced_subsample |
+
+The values in this section are inner-CV search values from the training split.
+They are not held-out metrics.
+
+## Held-Out Comparison
+
+Verdict: `baseline_preferred`.
+
+| Role | Model | Sensors | PR-AUC | ROC-AUC | Precision | Recall | F1 | False alarm rate | Threshold |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `early_optuna_best` | random_forest | 155 / 590 | 0.194720 | 0.759091 | 0.144578 | 0.750000 | 0.242424 | 0.322727 | 0.217130 |
+| `full_prefix_same_config` | random_forest | 590 / 590 | 0.221676 | 0.758807 | 0.138889 | 0.625000 | 0.227273 | 0.281818 | 0.217130 |
+| `tabular_selected_model` | random_forest | 590 / 590 | 0.221624 | 0.792614 | 0.196970 | 0.812500 | n/a | n/a | 0.140000 |
+
+The selected early model uses 26.3% of the sensor sequence. Its held-out PR-AUC
+is below the best full-sensor comparison by more than the configured 5%
+tolerance, so the current held-out result favors the full-sensor baseline.
+
+Confusion matrices at the recorded thresholds:
+
+| Role | TN | FP | FN | TP |
+| --- | ---: | ---: | ---: | ---: |
+| `early_optuna_best` | 149 | 71 | 4 | 12 |
+| `full_prefix_same_config` | 158 | 62 | 6 | 10 |
+
+The selected tabular baseline is imported from `reports/model_comparison.json`;
+that existing artifact records expected cost `83.0` at threshold `0.14`.
+
+## Diagnostic Prefix Curve
+
+The diagnostic curve reuses the winning non-access settings and refits prefix
+models at configured prefix lengths, the selected early index, and the full
+sensor count. It is diagnostic only and does not feed back into model choice.
+
+| Latest sensor index | Sensor fraction | Held-out PR-AUC |
+| ---: | ---: | ---: |
+| 16 | 0.027119 | 0.074693 |
+| 32 | 0.054237 | 0.090292 |
+| 64 | 0.108475 | 0.215714 |
+| 128 | 0.216949 | 0.205706 |
+| 155 | 0.262712 | 0.194720 |
+| 256 | 0.433898 | 0.223055 |
+| 512 | 0.867797 | 0.216824 |
+| 590 | 1.000000 | 0.221676 |
+
+The best point on this descriptive curve is index 256 with held-out PR-AUC
+0.223055, but this was not selected by the Optuna study and is not a replacement
+model decision.
 
 ## Top Trials
 
@@ -145,13 +196,18 @@ access.
 ## Interpretation
 
 The best completed study result uses the first 155 of 590 ordered sensor
-columns, about 26.3% of the available sensor sequence, while reaching a mean
-inner-CV PR-AUC of 0.223890 after the earliness penalty. This is a search result
-on the training split only, not a deployment metric.
+columns, about 26.3% of the available sensor sequence. The earlier reported
+0.223890 PR-AUC was an inner-CV search value from the training split, not a
+held-out metric.
 
-The result should be interpreted as a candidate early-detection configuration
-for the next evaluation step. A production decision requires the deferred
-held-out test comparison against a full-feature baseline on the same outer split.
+On the held-out split, the selected early model reaches PR-AUC 0.194720. The
+same non-access configuration with all sensors reaches PR-AUC 0.221676, and the
+existing selected tabular baseline reaches PR-AUC 0.221624. Under the configured
+5% tolerance rule, the early model is not competitive with the full-sensor
+comparisons in this completed study.
+
+The result should be interpreted as useful evidence about where early signal may
+exist in the ordered sensor sequence, not as a production early-exit model.
 
 ## Reproducing The Study
 
@@ -163,5 +219,10 @@ conda activate mlops
 python scripts\run_early_detection.py
 ```
 
-The command rewrites the three namespaced study artifacts listed above using the
-configured paths in `configs/config.yaml`.
+To evaluate the already completed 100-trial study without rerunning Optuna:
+
+```powershell
+. "$env:USERPROFILE\miniconda3\shell\condabin\conda-hook.ps1"
+conda activate mlops
+python scripts\run_early_detection.py --evaluate-existing
+```
