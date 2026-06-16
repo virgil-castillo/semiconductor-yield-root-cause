@@ -234,7 +234,7 @@ def test_hyperparam_config_is_frozen_dataclass() -> None:
     cfg = HyperparamConfig(
         access=access,
         missing_threshold=0.5,
-        variance_threshold=0.01,
+        cv_threshold=0.01,
         correlation_threshold=0.95,
         selection_method="none",
         max_features=None,
@@ -256,7 +256,7 @@ def test_hyperparam_config_stores_all_fields() -> None:
     cfg = HyperparamConfig(
         access=access,
         missing_threshold=0.3,
-        variance_threshold=0.005,
+        cv_threshold=0.005,
         correlation_threshold=0.9,
         selection_method="univariate",
         max_features=10,
@@ -268,7 +268,7 @@ def test_hyperparam_config_stores_all_fields() -> None:
     )
     assert cfg.access is access
     assert cfg.missing_threshold == 0.3
-    assert cfg.variance_threshold == 0.005
+    assert cfg.cv_threshold == 0.005
     assert cfg.correlation_threshold == 0.9
     assert cfg.selection_method == "univariate"
     assert cfg.max_features == 10
@@ -451,7 +451,7 @@ def _make_fold_cfg(
     selection_method: str = "none",
     max_features: int | None = None,
     missing_threshold: float = 0.5,
-    variance_threshold: float = 0.0,
+    cv_threshold: float = 0.0,
     correlation_threshold: float = 1.0,
     model_family: str = "random_forest",
 ) -> HyperparamConfig:
@@ -459,7 +459,7 @@ def _make_fold_cfg(
     return HyperparamConfig(
         access=SensorAccess(access_type="prefix", prefix_end=1),
         missing_threshold=missing_threshold,
-        variance_threshold=variance_threshold,
+        cv_threshold=cv_threshold,
         correlation_threshold=correlation_threshold,
         selection_method=selection_method,
         max_features=max_features,
@@ -522,11 +522,11 @@ def test_fold_preprocessor_fit_uses_only_train_rows() -> None:
 
 
 # ---------------------------------------------------------------------------
-# FoldPreprocessor — test 2: zero-variance scale → 1.0
+# FoldPreprocessor — test 2: constant-column scale → 1.0
 # ---------------------------------------------------------------------------
 
 
-def test_fold_preprocessor_zero_variance_scale_is_one() -> None:
+def test_fold_preprocessor_constant_sensor_scale_is_one() -> None:
     """A constant column on the train fold gets scaler_scale entry of 1.0.
 
     Transforming that column must produce finite values (no inf/nan).
@@ -537,16 +537,16 @@ def test_fold_preprocessor_zero_variance_scale_is_one() -> None:
     n = 20
     data = {
         "sensor_0": rng.standard_normal(n),
-        "sensor_1": np.full(n, 3.14),  # constant → zero variance
+        "sensor_1": np.full(n, 3.14),  # constant non-zero signal
         "sensor_2": rng.standard_normal(n),
     }
     df = pd.DataFrame(data)
     y = (rng.random(n) > 0.5).astype(int)
 
-    cfg = _make_fold_cfg(selection_method="none", variance_threshold=0.0)
+    cfg = _make_fold_cfg(selection_method="none", cv_threshold=0.0)
     fp = FoldPreprocessor.fit(df, y, cfg, random_seed=0)
 
-    # sensor_1 should survive (variance == 0 is NOT strictly below 0.0)
+    # sensor_1 should survive (CV == 0.0 is NOT strictly below 0.0)
     assert "sensor_1" in fp.retained_cols
     idx_const = fp.retained_cols.index("sensor_1")
     assert fp.scaler_scale[idx_const] == pytest.approx(1.0)
@@ -724,7 +724,7 @@ def _make_tune_cfg(threshold: float) -> HyperparamConfig:
     return HyperparamConfig(
         access=SensorAccess(access_type="prefix", prefix_end=1),
         missing_threshold=0.5,
-        variance_threshold=0.0,
+        cv_threshold=0.0,
         correlation_threshold=1.0,
         selection_method="none",
         max_features=None,
@@ -741,7 +741,7 @@ def _make_far_cfg(false_alarm_rate: float) -> HyperparamConfig:
     return HyperparamConfig(
         access=SensorAccess(access_type="prefix", prefix_end=1),
         missing_threshold=0.5,
-        variance_threshold=0.0,
+        cv_threshold=0.0,
         correlation_threshold=1.0,
         selection_method="none",
         max_features=None,
@@ -1074,7 +1074,7 @@ def _make_eval_cfg(
     selection_method: str = "none",
     max_features: int | None = None,
     missing_threshold: float = 0.9,
-    variance_threshold: float = 0.0,
+    cv_threshold: float = 0.0,
     correlation_threshold: float = 1.0,
     model_params: dict[str, object] | None = None,
 ) -> HyperparamConfig:
@@ -1082,7 +1082,7 @@ def _make_eval_cfg(
     return HyperparamConfig(
         access=access,
         missing_threshold=missing_threshold,
-        variance_threshold=variance_threshold,
+        cv_threshold=cv_threshold,
         correlation_threshold=correlation_threshold,
         selection_method=selection_method,
         max_features=max_features,
@@ -1203,15 +1203,15 @@ def test_evaluate_config_neg_inf_in_sensors_raises() -> None:
 def test_evaluate_config_infeasible_no_retained_features() -> None:
     """Config yielding no retained features → feasible=False, score=-1.0, metric=nan.
 
-    Uses a variance_threshold so large that all sensor columns are dropped
+    Uses a cv_threshold so large that all sensor columns are dropped
     in every fold, making the preprocessor empty and every fold invalid.
     """
     from yield_risk.early_detection import EARLY_DETECTION_FLOOR, evaluate_config
 
     x, y, raw_sensor_cols = _make_eval_df(n_rows=120, n_sensors=20, seed=42)
     access = SensorAccess(access_type="prefix", prefix_end=20)
-    # variance_threshold=1e10 will drop all columns (variance << 1e10)
-    cfg = _make_eval_cfg(access, variance_threshold=1e10)
+    # cv_threshold=1e10 will drop all columns.
+    cfg = _make_eval_cfg(access, cv_threshold=1e10)
 
     result = evaluate_config(
         x, y, raw_sensor_cols,
@@ -1561,7 +1561,7 @@ def test_load_early_detection_config_defaults_on_missing_file(
         "lightgbm",
     ]
     assert cfg.missing_threshold == (0.2, 0.6)
-    assert cfg.variance_threshold == pytest.approx((1.0e-6, 1.0e-2))
+    assert cfg.cv_threshold == pytest.approx((1.0e-3, 1.0))
     assert cfg.correlation_threshold == pytest.approx((0.85, 0.99))
     assert cfg.selection_methods == [
         "none",
@@ -1792,7 +1792,7 @@ def test_real_data_sanity_check() -> None:
     cfg = HyperparamConfig(
         access=access,
         missing_threshold=0.5,
-        variance_threshold=0.0,
+        cv_threshold=0.0,
         correlation_threshold=1.0,
         selection_method="none",
         max_features=None,
@@ -1858,7 +1858,7 @@ def _make_ed_cfg_for_suggest(
             model_families if model_families is not None else ["random_forest"]
         ),
         missing_threshold=(0.2, 0.6),
-        variance_threshold=(1e-6, 1e-2),
+        cv_threshold=(1e-3, 1.0),
         correlation_threshold=(0.85, 0.99),
         selection_methods=(
             selection_methods if selection_methods is not None else ["none"]
@@ -2193,7 +2193,7 @@ def test_suggest_config_window_bounds_clamped_when_min_window_gt_n_sensors() -> 
         max_window_size=20,  # larger than n_sensors
         model_families=["random_forest"],
         missing_threshold=(0.2, 0.6),
-        variance_threshold=(1e-6, 1e-2),
+        cv_threshold=(1e-3, 1.0),
         correlation_threshold=(0.85, 0.99),
         selection_methods=["none"],
         max_features=(5, 50),
@@ -2231,7 +2231,7 @@ def test_suggest_config_window_single_sensor_valid() -> None:
         max_window_size=1,
         model_families=["random_forest"],
         missing_threshold=(0.2, 0.6),
-        variance_threshold=(1e-6, 1e-2),
+        cv_threshold=(1e-3, 1.0),
         correlation_threshold=(0.85, 0.99),
         selection_methods=["none"],
         max_features=(5, 50),
@@ -2255,7 +2255,7 @@ def test_suggest_config_window_single_sensor_valid() -> None:
 def test_suggest_config_preprocessing_fields_in_bounds() -> None:
     """suggest_config samples preprocessing floats within configured bounds.
 
-    missing_threshold, variance_threshold, and correlation_threshold must all
+    missing_threshold, cv_threshold, and correlation_threshold must all
     fall within their respective configured ranges.
     """
     from yield_risk.early_detection import suggest_config
@@ -2269,8 +2269,8 @@ def test_suggest_config_preprocessing_fields_in_bounds() -> None:
 
     lo, hi = ed_cfg.missing_threshold
     assert lo <= cfg.missing_threshold <= hi
-    lo, hi = ed_cfg.variance_threshold
-    assert lo <= cfg.variance_threshold <= hi
+    lo, hi = ed_cfg.cv_threshold
+    assert lo <= cfg.cv_threshold <= hi
     lo, hi = ed_cfg.correlation_threshold
     assert lo <= cfg.correlation_threshold <= hi
 
@@ -2308,7 +2308,7 @@ def _make_ed_cfg_for_run_study(
         max_window_size=n_sensors,
         model_families=["random_forest"],
         missing_threshold=(0.2, 0.9),
-        variance_threshold=(1e-6, 1e-2),
+        cv_threshold=(1e-3, 1.0),
         correlation_threshold=(0.85, 0.99),
         selection_methods=["none"],
         max_features=(2, n_sensors),
@@ -2438,12 +2438,12 @@ def test_run_study_infeasible_trials_score_floor() -> None:
 def test_run_study_infeasible_no_raise() -> None:
     """run_study completes without raising even when all trials are infeasible.
 
-    Forces infeasibility via variance_threshold so large all columns are dropped.
+    Forces infeasibility via cv_threshold so large all columns are dropped.
     """
     from yield_risk.early_detection import EARLY_DETECTION_FLOOR, run_study
 
     x, y, raw_sensor_cols = _make_run_study_data()
-    # Huge variance_threshold: all columns dropped → all trials infeasible
+    # Huge cv_threshold: all columns dropped → all trials infeasible
     ed_cfg = EarlyDetectionConfig(
         n_trials=3,
         sampler_seed=7,
@@ -2455,7 +2455,7 @@ def test_run_study_infeasible_no_raise() -> None:
         max_window_size=10,
         model_families=["random_forest"],
         missing_threshold=(0.2, 0.9),
-        variance_threshold=(1e10, 2e10),  # so large all columns dropped
+        cv_threshold=(1e10, 2e10),  # so large all columns dropped
         correlation_threshold=(0.85, 0.99),
         selection_methods=["none"],
         max_features=(2, 10),
@@ -2581,7 +2581,7 @@ def _make_ed_cfg_for_build(
         max_window_size=n_sensors,
         model_families=["random_forest"],
         missing_threshold=(0.2, 0.9),
-        variance_threshold=(1e-6, 1e-2),
+        cv_threshold=(1e-3, 1.0),
         correlation_threshold=(0.85, 0.99),
         selection_methods=["none"],
         max_features=(2, n_sensors),
@@ -2630,7 +2630,7 @@ def test_hyperparam_config_to_dict_shape_prefix_tune() -> None:
     cfg = HyperparamConfig(
         access=access,
         missing_threshold=0.4,
-        variance_threshold=0.001,
+        cv_threshold=0.001,
         correlation_threshold=0.9,
         selection_method="none",
         max_features=None,
@@ -2649,7 +2649,7 @@ def test_hyperparam_config_to_dict_shape_prefix_tune() -> None:
         "window_size": None,
     }
     assert d["missing_threshold"] == pytest.approx(0.4)
-    assert d["variance_threshold"] == pytest.approx(0.001)
+    assert d["cv_threshold"] == pytest.approx(0.001)
     assert d["correlation_threshold"] == pytest.approx(0.9)
     assert d["selection_method"] == "none"
     assert d["max_features"] is None
@@ -2668,7 +2668,7 @@ def test_hyperparam_config_to_dict_shape_window_far() -> None:
     cfg = HyperparamConfig(
         access=access,
         missing_threshold=0.3,
-        variance_threshold=0.005,
+        cv_threshold=0.005,
         correlation_threshold=0.95,
         selection_method="univariate",
         max_features=10,
@@ -2699,7 +2699,7 @@ def test_hyperparam_config_to_dict_round_trip() -> None:
     cfg = HyperparamConfig(
         access=access,
         missing_threshold=0.45,
-        variance_threshold=0.002,
+        cv_threshold=0.002,
         correlation_threshold=0.88,
         selection_method="mutual_info",
         max_features=15,
@@ -2716,7 +2716,7 @@ def test_hyperparam_config_to_dict_round_trip() -> None:
     cfg_reconstructed = HyperparamConfig(
         access=access_reconstructed,
         missing_threshold=d["missing_threshold"],  # type: ignore[arg-type]
-        variance_threshold=d["variance_threshold"],  # type: ignore[arg-type]
+        cv_threshold=d["cv_threshold"],  # type: ignore[arg-type]
         correlation_threshold=d["correlation_threshold"],  # type: ignore[arg-type]
         selection_method=d["selection_method"],  # type: ignore[arg-type]
         max_features=d["max_features"],  # type: ignore[arg-type]
@@ -2843,7 +2843,7 @@ def test_build_best_record_config_round_trip() -> None:
     cfg_reconstructed = HyperparamConfig(
         access=access_reconstructed,
         missing_threshold=cfg_d["missing_threshold"],  # type: ignore[arg-type]
-        variance_threshold=cfg_d["variance_threshold"],  # type: ignore[arg-type]
+        cv_threshold=cfg_d["cv_threshold"],  # type: ignore[arg-type]
         correlation_threshold=cfg_d["correlation_threshold"],  # type: ignore[arg-type]
         selection_method=cfg_d["selection_method"],  # type: ignore[arg-type]
         max_features=cfg_d["max_features"],  # type: ignore[arg-type]
@@ -2917,7 +2917,7 @@ def test_build_best_record_infeasible_study_detection_metric_null() -> None:
         max_window_size=n_sensors,
         model_families=["random_forest"],
         missing_threshold=(0.2, 0.9),
-        variance_threshold=(1e10, 2e10),  # all columns dropped
+        cv_threshold=(1e10, 2e10),  # all columns dropped
         correlation_threshold=(0.85, 0.99),
         selection_methods=["none"],
         max_features=(2, n_sensors),
@@ -2973,7 +2973,7 @@ def test_sanitize_nan_directly() -> None:
         max_window_size=n_sensors,
         model_families=["random_forest"],
         missing_threshold=(0.2, 0.9),
-        variance_threshold=(1e10, 2e10),
+        cv_threshold=(1e10, 2e10),
         correlation_threshold=(0.85, 0.99),
         selection_methods=["none"],
         max_features=(2, n_sensors),
@@ -3064,7 +3064,7 @@ def _fake_config(tmp_path: Path) -> object:
     paths = PathsConfig(
         raw_dir=tmp_path / "raw",
         interim_dir=tmp_path / "interim",
-        processed_dir=tmp_path / "processed",
+        splits_dir=tmp_path / "splits",
         models_dir=tmp_path / "models",
         reports_dir=tmp_path / "reports",
         figures_dir=tmp_path / "figures",
@@ -3072,10 +3072,9 @@ def _fake_config(tmp_path: Path) -> object:
     run = RunConfig(
         random_seed=0,
         test_size=0.2,
-        val_size=0.2,
         cv_folds=2,
         missing_threshold=0.5,
-        variance_threshold=1e-6,
+        cv_threshold=1e-6,
         correlation_threshold=0.95,
     )
     return Config(paths=paths, run=run)

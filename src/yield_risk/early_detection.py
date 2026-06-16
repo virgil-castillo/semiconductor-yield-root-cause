@@ -32,11 +32,7 @@ from xgboost import XGBClassifier
 
 from yield_risk.config import CostMatrix
 from yield_risk.evaluate import compute_metrics
-from yield_risk.preprocess import (
-    drop_high_correlation,
-    drop_high_missing,
-    drop_low_variance,
-)
+from yield_risk.preprocess import SecomPreprocessor
 from yield_risk.thresholding import expected_cost_at_threshold
 
 _VALID_ACCESS_TYPES = frozenset({"prefix", "window"})
@@ -164,8 +160,8 @@ class HyperparamConfig:
         access: Which sensors are observable at this production stage.
         missing_threshold: Maximum fraction of missing values allowed per
             column before that column is dropped.
-        variance_threshold: Minimum variance a column must have to survive
-            the variance filter.
+        cv_threshold: Minimum coefficient of variation a column must have to
+            survive the CV filter.
         correlation_threshold: Absolute Pearson correlation above which one
             of a correlated pair is dropped.
         selection_method: Feature selection strategy.  One of ``"none"``,
@@ -187,7 +183,7 @@ class HyperparamConfig:
 
     access: SensorAccess
     missing_threshold: float
-    variance_threshold: float
+    cv_threshold: float
     correlation_threshold: float
     selection_method: str
     max_features: int | None
@@ -328,10 +324,12 @@ class FoldPreprocessor:
         scaler_mean: Per-column mean fitted by ``StandardScaler`` on the
             train fold (shape ``(n_retained,)``).
         scaler_scale: Per-column scale fitted by ``StandardScaler``.
-            Zero-variance entries are replaced with ``1.0`` to prevent
-            division by zero.
+            Zero-scale entries are replaced with ``1.0`` to prevent division
+            by zero.
         selected_idx: Integer indices (into ``retained_cols``) of the columns
             kept by the feature selector.
+        secom_preprocessor: Fitted main preprocessor that owns missing-value,
+            median-imputation, CV, and correlation filtering.
     """
 
     retained_cols: list[str]
@@ -339,6 +337,7 @@ class FoldPreprocessor:
     scaler_mean: np.ndarray
     scaler_scale: np.ndarray
     selected_idx: np.ndarray  # indices into retained_cols kept by selection
+    secom_preprocessor: SecomPreprocessor
 
     @classmethod
     def fit(
@@ -351,12 +350,10 @@ class FoldPreprocessor:
         """Fit all preprocessing statistics on the training fold only.
 
         Pipeline order:
-        1. ``drop_high_missing`` to choose surviving columns.
-        2. Median imputation (compute and capture medians from train fold).
-        3. ``drop_low_variance`` to further filter columns.
-        4. ``drop_high_correlation`` to remove redundant columns.
-        5. Fit ``StandardScaler``; replace zero-scale entries with 1.0.
-        6. Fit the configured feature selector.
+        1. Fit ``SecomPreprocessor`` for missing-value, median-imputation,
+           CV, and correlation filtering.
+        2. Fit ``StandardScaler``; replace zero-scale entries with 1.0.
+        3. Fit the configured feature selector.
 
         Args:
             x_train_window: DataFrame of sensor columns for the training fold.
@@ -368,58 +365,34 @@ class FoldPreprocessor:
         Returns:
             A fitted ``FoldPreprocessor`` capturing all statistics.
         """
-        # --- Step 1: drop high-missing columns ----------------------------
-        df = x_train_window.copy()
-        df = drop_high_missing(df, cfg.missing_threshold)
+        secom_preprocessor = SecomPreprocessor(
+            missing_threshold=cfg.missing_threshold,
+            cv_threshold=cfg.cv_threshold,
+            correlation_threshold=cfg.correlation_threshold,
+        )
+        secom_preprocessor.fit(x_train_window)
 
-        if df.shape[1] == 0:
-            return cls(
-                retained_cols=[],
-                medians={},
-                scaler_mean=np.empty(0, dtype=np.float64),
-                scaler_scale=np.empty(0, dtype=np.float64),
-                selected_idx=np.empty(0, dtype=int),
-            )
-
-        # --- Step 2: median imputation ------------------------------------
-        medians: dict[str, float] = {
-            col: float(df[col].median()) for col in df.columns
-        }
-        df = df.fillna(medians)
-
-        # --- Step 3: drop low-variance ------------------------------------
-        df = drop_low_variance(df, cfg.variance_threshold)
-
-        if df.shape[1] == 0:
-            return cls(
-                retained_cols=[],
-                medians={},
-                scaler_mean=np.empty(0, dtype=np.float64),
-                scaler_scale=np.empty(0, dtype=np.float64),
-                selected_idx=np.empty(0, dtype=int),
-            )
-
-        # --- Step 4: drop high-correlation --------------------------------
-        df = drop_high_correlation(df, cfg.correlation_threshold)
-
-        if df.shape[1] == 0:
-            return cls(
-                retained_cols=[],
-                medians={},
-                scaler_mean=np.empty(0, dtype=np.float64),
-                scaler_scale=np.empty(0, dtype=np.float64),
-                selected_idx=np.empty(0, dtype=int),
-            )
-
-        retained_cols: list[str] = list(df.columns)
-        # Restrict medians to only the retained columns
+        retained_cols: list[str] = list(secom_preprocessor.kept_columns_)
         retained_medians: dict[str, float] = {
-            col: medians[col] for col in retained_cols
+            col: float(secom_preprocessor.medians_[col])
+            for col in retained_cols
         }
+
+        if not retained_cols:
+            return cls(
+                retained_cols=[],
+                medians={},
+                scaler_mean=np.empty(0, dtype=np.float64),
+                scaler_scale=np.empty(0, dtype=np.float64),
+                selected_idx=np.empty(0, dtype=int),
+                secom_preprocessor=secom_preprocessor,
+            )
+
+        df = secom_preprocessor.transform(x_train_window)
         n_retained = len(retained_cols)
 
-        # --- Step 5: fit StandardScaler -----------------------------------
-        x_arr = df[retained_cols].values.astype(np.float64)
+        # --- Step 2: fit StandardScaler -----------------------------------
+        x_arr = df.to_numpy(dtype=np.float64)
         scaler = StandardScaler()
         scaler.fit(x_arr)
         scaler_mean: np.ndarray = np.asarray(scaler.mean_, dtype=np.float64)
@@ -429,7 +402,7 @@ class FoldPreprocessor:
 
         x_scaled = (x_arr - scaler_mean) / scaler_scale
 
-        # --- Step 6: fit selector -----------------------------------------
+        # --- Step 3: fit selector -----------------------------------------
         method = cfg.selection_method
         max_f = cfg.max_features
 
@@ -472,6 +445,7 @@ class FoldPreprocessor:
             scaler_mean=scaler_mean,
             scaler_scale=scaler_scale,
             selected_idx=selected_idx,
+            secom_preprocessor=secom_preprocessor,
         )
 
     def transform(self, x_window: pd.DataFrame) -> np.ndarray:
@@ -490,16 +464,12 @@ class FoldPreprocessor:
         """
         n_rows = len(x_window)
 
-        if not self.retained_cols or len(self.selected_idx) == 0:
+        df = self.secom_preprocessor.transform(x_window)
+
+        if df.shape[1] == 0 or len(self.selected_idx) == 0:
             return np.empty((n_rows, 0), dtype=np.float64)
 
-        # Subset to retained columns only
-        df = x_window[self.retained_cols].copy()
-
-        # Impute with train medians
-        df = df.fillna(self.medians)
-
-        x_arr = df.values.astype(np.float64)
+        x_arr = df.to_numpy(dtype=np.float64)
 
         # Scale with fitted stats
         x_scaled = (x_arr - self.scaler_mean) / self.scaler_scale
@@ -869,7 +839,7 @@ _VALID_SELECTION_METHODS: frozenset[str] = frozenset(
 _TUPLE_FLOAT_FIELDS: frozenset[str] = frozenset(
     {
         "missing_threshold",
-        "variance_threshold",
+        "cv_threshold",
         "correlation_threshold",
         "threshold_range",
     }
@@ -892,7 +862,7 @@ _DEFAULTS: dict[str, object] = {
         "lightgbm",
     ],
     "missing_threshold": [0.2, 0.6],
-    "variance_threshold": [1.0e-6, 1.0e-2],
+    "cv_threshold": [1.0e-3, 1.0],
     "correlation_threshold": [0.85, 0.99],
     "selection_methods": ["none", "univariate", "mutual_info", "model_importance"],
     "max_features": [10, 200],
@@ -930,8 +900,7 @@ class EarlyDetectionConfig:
             of the four Spec-A families.
         missing_threshold: ``(low, high)`` search bounds for the missing-value
             drop threshold.
-        variance_threshold: ``(low, high)`` search bounds for the variance
-            drop threshold.
+        cv_threshold: ``(low, high)`` search bounds for the CV drop threshold.
         correlation_threshold: ``(low, high)`` search bounds for the
             correlation drop threshold.
         selection_methods: Feature-selection strategies to sample from.
@@ -959,7 +928,7 @@ class EarlyDetectionConfig:
     max_window_size: int
     model_families: list[str]
     missing_threshold: tuple[float, float]
-    variance_threshold: tuple[float, float]
+    cv_threshold: tuple[float, float]
     correlation_threshold: tuple[float, float]
     selection_methods: list[str]
     max_features: tuple[int, int]
@@ -1073,7 +1042,7 @@ def load_early_detection_config(
         return (int(seq[0]), int(seq[1]))
 
     missing_threshold = _to_float_tuple("missing_threshold")
-    variance_threshold = _to_float_tuple("variance_threshold")
+    cv_threshold = _to_float_tuple("cv_threshold")
     correlation_threshold = _to_float_tuple("correlation_threshold")
     threshold_range = _to_float_tuple("threshold_range")
     max_features = _to_int_tuple("max_features")
@@ -1138,7 +1107,7 @@ def load_early_detection_config(
     # Bound-pair low <= high checks
     for name, (low, high) in (
         ("missing_threshold", missing_threshold),
-        ("variance_threshold", variance_threshold),
+        ("cv_threshold", cv_threshold),
         ("correlation_threshold", correlation_threshold),
         ("threshold_range", threshold_range),
     ):
@@ -1163,7 +1132,7 @@ def load_early_detection_config(
         max_window_size=max_window_size,
         model_families=model_families,
         missing_threshold=missing_threshold,
-        variance_threshold=variance_threshold,
+        cv_threshold=cv_threshold,
         correlation_threshold=correlation_threshold,
         selection_methods=selection_methods,
         max_features=max_features,
@@ -1220,8 +1189,8 @@ def suggest_config(
     missing_threshold = trial.suggest_float(
         "missing_threshold", *ed_cfg.missing_threshold
     )
-    variance_threshold = trial.suggest_float(
-        "variance_threshold", *ed_cfg.variance_threshold, log=True
+    cv_threshold = trial.suggest_float(
+        "cv_threshold", *ed_cfg.cv_threshold, log=True
     )
     correlation_threshold = trial.suggest_float(
         "correlation_threshold", *ed_cfg.correlation_threshold
@@ -1316,7 +1285,7 @@ def suggest_config(
     return HyperparamConfig(
         access=access,
         missing_threshold=missing_threshold,
-        variance_threshold=variance_threshold,
+        cv_threshold=cv_threshold,
         correlation_threshold=correlation_threshold,
         selection_method=selection_method,
         max_features=max_features,
@@ -1440,7 +1409,7 @@ def hyperparam_config_to_dict(cfg: HyperparamConfig) -> dict[str, object]:
     * ``access``: nested dict with keys ``access_type``, ``prefix_end``,
       ``window_start``, ``window_size`` (``None`` preserved for inapplicable
       fields).
-    * All scalar fields (``missing_threshold``, ``variance_threshold``, etc.)
+    * All scalar fields (``missing_threshold``, ``cv_threshold``, etc.)
       are returned verbatim.
     * ``model_params`` is returned verbatim (``None`` values preserved, e.g.
       ``class_weight: None``).
@@ -1464,7 +1433,7 @@ def hyperparam_config_to_dict(cfg: HyperparamConfig) -> dict[str, object]:
             "window_size": cfg.access.window_size,
         },
         "missing_threshold": cfg.missing_threshold,
-        "variance_threshold": cfg.variance_threshold,
+        "cv_threshold": cfg.cv_threshold,
         "correlation_threshold": cfg.correlation_threshold,
         "selection_method": cfg.selection_method,
         "max_features": cfg.max_features,
