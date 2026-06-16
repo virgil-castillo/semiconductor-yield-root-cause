@@ -2905,7 +2905,7 @@ def test_build_best_record_infeasible_study_detection_metric_null() -> None:
     x, y, raw_sensor_cols = _make_build_data()
     n_sensors = len(raw_sensor_cols)
 
-    # Variance threshold so high all columns are dropped → all infeasible
+    # CV threshold so high all columns are dropped → all infeasible
     infeasible_ed_cfg = EarlyDetectionConfig(
         n_trials=3,
         sampler_seed=7,
