@@ -3007,6 +3007,399 @@ def test_sanitize_nan_directly() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Core holdout fit/evaluate helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_detector_data(
+    n_rows: int = 80,
+    n_sensors: int = 6,
+    seed: int = 123,
+) -> tuple[pd.DataFrame, np.ndarray, list[str]]:
+    """Return separable sensor data for fitted-detector tests.
+
+    Args:
+        n_rows: Number of samples.
+        n_sensors: Number of sensor columns.
+        seed: RNG seed.
+
+    Returns:
+        Tuple of feature frame, binary labels, and ordered raw sensor columns.
+    """
+    rng = np.random.default_rng(seed)
+    y = np.array([0, 1] * (n_rows // 2), dtype=int)
+    raw_sensor_cols = [f"sensor_{i:03d}" for i in range(n_sensors)]
+    data = {
+        col: rng.standard_normal(n_rows) + y * (1.5 if i == 0 else 0.15)
+        for i, col in enumerate(raw_sensor_cols)
+    }
+    return pd.DataFrame(data), y, raw_sensor_cols
+
+
+def _make_detector_cfg(
+    *,
+    threshold_policy: str = "tune",
+    threshold: float | None = 0.5,
+    false_alarm_rate: float | None = None,
+    model_family: str = "logistic_regression",
+    model_params: dict[str, object] | None = None,
+    cv_threshold: float = 0.0,
+) -> HyperparamConfig:
+    """Return a HyperparamConfig for fitted-detector tests.
+
+    Args:
+        threshold_policy: Decision-threshold policy.
+        threshold: Frozen threshold for the ``"tune"`` policy.
+        false_alarm_rate: FAR target for the ``"far_constraint"`` policy.
+        model_family: Estimator family.
+        model_params: Optional estimator parameter overrides.
+        cv_threshold: Coefficient-of-variation feature filter threshold.
+
+    Returns:
+        Hyperparameter configuration for the helper tests.
+    """
+    return HyperparamConfig(
+        access=SensorAccess(access_type="prefix", prefix_end=4),
+        missing_threshold=0.9,
+        cv_threshold=cv_threshold,
+        correlation_threshold=1.0,
+        selection_method="none",
+        max_features=None,
+        model_family=model_family,
+        model_params={} if model_params is None else model_params,
+        threshold_policy=threshold_policy,
+        threshold=threshold,
+        false_alarm_rate=false_alarm_rate,
+    )
+
+
+def _manual_oof_threshold(
+    x_train: pd.DataFrame,
+    y_train: np.ndarray,
+    raw_sensor_cols: list[str],
+    cfg: HyperparamConfig,
+    *,
+    inner_cv_folds: int,
+    random_seed: int,
+) -> float:
+    """Resolve a FAR threshold from public train-fold primitives.
+
+    Args:
+        x_train: Training frame.
+        y_train: Training labels.
+        raw_sensor_cols: Ordered raw sensor column names.
+        cfg: Hyperparameter configuration.
+        inner_cv_folds: Number of stratified folds.
+        random_seed: Random state for splitting and estimators.
+
+    Returns:
+        Threshold resolved from concatenated out-of-fold train predictions.
+    """
+    from sklearn.model_selection import StratifiedKFold
+
+    from yield_risk.early_detection import (
+        FoldPreprocessor,
+        build_estimator,
+        resolve_threshold,
+        select_ordered_sensors,
+    )
+
+    cv = StratifiedKFold(
+        n_splits=inner_cv_folds, shuffle=True, random_state=random_seed
+    )
+    labels: list[np.ndarray] = []
+    probabilities: list[np.ndarray] = []
+
+    for train_idx, val_idx in cv.split(x_train, y_train):
+        y_fold_train = y_train[train_idx]
+        if len(np.unique(y_fold_train)) < 2:
+            continue
+
+        x_fold_train = x_train.iloc[train_idx]
+        x_fold_val = x_train.iloc[val_idx]
+        x_fold_train_window, _ = select_ordered_sensors(
+            x_fold_train, raw_sensor_cols, cfg.access
+        )
+        x_fold_val_window, _ = select_ordered_sensors(
+            x_fold_val, raw_sensor_cols, cfg.access
+        )
+        preprocessor = FoldPreprocessor.fit(
+            x_fold_train_window, y_fold_train, cfg, random_seed
+        )
+        if not preprocessor.retained_cols or len(preprocessor.selected_idx) == 0:
+            continue
+
+        estimator = build_estimator(cfg.model_family, cfg.model_params, random_seed)
+        estimator.fit(preprocessor.transform(x_fold_train_window), y_fold_train)
+        proba_out = estimator.predict_proba(
+            preprocessor.transform(x_fold_val_window)
+        )
+        if proba_out.shape[1] < 2:
+            continue
+
+        labels.append(y_train[val_idx])
+        probabilities.append(proba_out[:, 1])
+
+    assert labels, "test data must produce at least one valid OOF fold"
+    return resolve_threshold(
+        np.concatenate(labels), np.concatenate(probabilities), cfg
+    )
+
+
+def test_hyperparam_config_from_dict_round_trips_best_json_config() -> None:
+    """hyperparam_config_from_dict reconstructs serialized best config data."""
+    from yield_risk.early_detection import (
+        hyperparam_config_from_dict,
+        hyperparam_config_to_dict,
+    )
+
+    cfg = HyperparamConfig(
+        access=SensorAccess(access_type="window", window_start=2, window_size=4),
+        missing_threshold=0.4,
+        cv_threshold=0.001,
+        correlation_threshold=0.9,
+        selection_method="univariate",
+        max_features=8,
+        model_family="xgboost",
+        model_params={"learning_rate": 0.05, "n_estimators": 20},
+        threshold_policy="far_constraint",
+        threshold=None,
+        false_alarm_rate=0.05,
+    )
+
+    assert hyperparam_config_from_dict(hyperparam_config_to_dict(cfg)) == cfg
+
+
+def test_fit_early_detector_tune_uses_config_threshold() -> None:
+    """fit_early_detector freezes the serialized tune threshold from cfg."""
+    from yield_risk.early_detection import fit_early_detector
+
+    x_train, y_train, raw_sensor_cols = _make_detector_data()
+    cfg = _make_detector_cfg(threshold_policy="tune", threshold=0.73)
+
+    detector = fit_early_detector(
+        x_train,
+        y_train,
+        raw_sensor_cols,
+        cfg,
+        inner_cv_folds=3,
+        random_seed=0,
+    )
+
+    assert detector.threshold == pytest.approx(0.73)
+
+
+def test_fit_early_detector_far_constraint_uses_train_oof_threshold() -> None:
+    """fit_early_detector resolves FAR threshold from train OOF predictions."""
+    from yield_risk.early_detection import fit_early_detector
+
+    x_train, y_train, raw_sensor_cols = _make_detector_data(n_rows=90)
+    cfg = _make_detector_cfg(
+        threshold_policy="far_constraint",
+        threshold=None,
+        false_alarm_rate=0.2,
+    )
+    expected_threshold = _manual_oof_threshold(
+        x_train,
+        y_train,
+        raw_sensor_cols,
+        cfg,
+        inner_cv_folds=3,
+        random_seed=4,
+    )
+
+    detector = fit_early_detector(
+        x_train,
+        y_train,
+        raw_sensor_cols,
+        cfg,
+        inner_cv_folds=3,
+        random_seed=4,
+    )
+
+    assert detector.threshold == pytest.approx(expected_threshold)
+
+
+def test_fit_early_detector_empty_raw_sensor_cols_raises() -> None:
+    """fit_early_detector raises the raw-sensor guard for empty sensor lists."""
+    from yield_risk.early_detection import fit_early_detector
+
+    x_train, y_train, _ = _make_detector_data()
+    cfg = _make_detector_cfg()
+
+    with pytest.raises(ValueError, match="No raw sensor_ columns found"):
+        fit_early_detector(
+            x_train,
+            y_train,
+            [],
+            cfg,
+            inner_cv_folds=3,
+            random_seed=0,
+        )
+
+
+def test_fit_early_detector_zero_features_raises() -> None:
+    """fit_early_detector rejects full-train preprocessing with zero features."""
+    from yield_risk.early_detection import fit_early_detector
+
+    x_train, y_train, raw_sensor_cols = _make_detector_data()
+    cfg = _make_detector_cfg(cv_threshold=1e10)
+
+    with pytest.raises(ValueError, match="Early detector retained zero features"):
+        fit_early_detector(
+            x_train,
+            y_train,
+            raw_sensor_cols,
+            cfg,
+            inner_cv_folds=3,
+            random_seed=0,
+        )
+
+
+def test_fit_early_detector_far_constraint_no_valid_oof_raises() -> None:
+    """fit_early_detector raises when FAR threshold has no valid OOF rows."""
+    from yield_risk.early_detection import fit_early_detector
+
+    x_train, y_train, raw_sensor_cols = _make_detector_data()
+    cfg = _make_detector_cfg(
+        threshold_policy="far_constraint",
+        threshold=None,
+        false_alarm_rate=0.1,
+        cv_threshold=1e10,
+    )
+
+    with pytest.raises(
+        ValueError, match="Cannot resolve final threshold from training data"
+    ):
+        fit_early_detector(
+            x_train,
+            y_train,
+            raw_sensor_cols,
+            cfg,
+            inner_cv_folds=3,
+            random_seed=0,
+        )
+
+
+def test_fit_early_detector_xgboost_injects_scale_pos_weight() -> None:
+    """fit_early_detector computes xgboost scale_pos_weight from train labels."""
+    from yield_risk.early_detection import fit_early_detector
+
+    x_train, _, raw_sensor_cols = _make_detector_data(n_rows=60)
+    y_train = np.array([0] * 45 + [1] * 15, dtype=int)
+    cfg = _make_detector_cfg(
+        model_family="xgboost",
+        model_params={"n_estimators": 2, "max_depth": 2},
+    )
+
+    detector = fit_early_detector(
+        x_train,
+        y_train,
+        raw_sensor_cols,
+        cfg,
+        inner_cv_folds=3,
+        random_seed=0,
+    )
+
+    assert detector.estimator.get_params()["scale_pos_weight"] == pytest.approx(3.0)
+
+
+def test_evaluate_fitted_early_detector_returns_json_safe_metrics() -> None:
+    """evaluate_fitted_early_detector returns sanitized holdout metrics."""
+    from yield_risk.config import CostMatrix
+    from yield_risk.early_detection import (
+        evaluate_fitted_early_detector,
+        fit_early_detector,
+    )
+
+    x, y, raw_sensor_cols = _make_detector_data(n_rows=80)
+    cfg = _make_detector_cfg(threshold_policy="tune", threshold=0.5)
+    detector = fit_early_detector(
+        x.iloc[:60],
+        y[:60],
+        raw_sensor_cols,
+        cfg,
+        inner_cv_folds=3,
+        random_seed=0,
+    )
+
+    metrics = evaluate_fitted_early_detector(
+        detector,
+        x.iloc[60:],
+        y[60:],
+        cost_matrix=CostMatrix(
+            true_pass=float("inf"),
+            true_fail=float("inf"),
+            false_fail=float("inf"),
+            false_pass=float("inf"),
+        ),
+    )
+
+    assert metrics["threshold"] == pytest.approx(detector.threshold)
+    assert metrics["expected_cost"] is None
+    assert metrics["n_sensors_used"] == 4
+    assert metrics["sensor_fraction"] == pytest.approx(4 / len(raw_sensor_cols))
+    json.dumps(metrics, allow_nan=False)
+
+
+def test_evaluate_fitted_early_detector_single_class_test_raises() -> None:
+    """evaluate_fitted_early_detector rejects single-class test holdouts."""
+    from yield_risk.early_detection import (
+        evaluate_fitted_early_detector,
+        fit_early_detector,
+    )
+
+    x, y, raw_sensor_cols = _make_detector_data(n_rows=80)
+    cfg = _make_detector_cfg(threshold_policy="tune", threshold=0.5)
+    detector = fit_early_detector(
+        x.iloc[:60],
+        y[:60],
+        raw_sensor_cols,
+        cfg,
+        inner_cv_folds=3,
+        random_seed=0,
+    )
+
+    with pytest.raises(ValueError, match="Test holdout must contain both classes"):
+        evaluate_fitted_early_detector(detector, x.iloc[60:], np.zeros(20, dtype=int))
+
+
+def test_evaluate_fitted_early_detector_one_column_proba_raises() -> None:
+    """evaluate_fitted_early_detector rejects one-column predict_proba output."""
+    from sklearn.dummy import DummyClassifier
+
+    from yield_risk.early_detection import (
+        FittedEarlyDetector,
+        FoldPreprocessor,
+        evaluate_fitted_early_detector,
+        select_ordered_sensors,
+    )
+
+    x, y, raw_sensor_cols = _make_detector_data(n_rows=80)
+    cfg = _make_detector_cfg(threshold_policy="tune", threshold=0.5)
+    x_train_window, window_cols = select_ordered_sensors(
+        x.iloc[:60], raw_sensor_cols, cfg.access
+    )
+    preprocessor = FoldPreprocessor.fit(x_train_window, y[:60], cfg, random_seed=0)
+    x_train_arr = preprocessor.transform(x_train_window)
+    estimator = DummyClassifier(strategy="most_frequent")
+    estimator.fit(x_train_arr, np.zeros(len(x_train_arr), dtype=int))
+    detector = FittedEarlyDetector(
+        config=cfg,
+        preprocessor=preprocessor,
+        estimator=estimator,
+        threshold=0.5,
+        raw_sensor_cols=raw_sensor_cols,
+        window_cols=window_cols,
+    )
+
+    with pytest.raises(
+        ValueError, match="Estimator did not produce positive-class probabilities"
+    ):
+        evaluate_fitted_early_detector(detector, x.iloc[60:], y[60:])
+
+
+# ---------------------------------------------------------------------------
 # CLI tests — run_early_detection.py  (Spec §5 / §6)
 # ---------------------------------------------------------------------------
 

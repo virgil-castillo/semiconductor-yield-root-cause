@@ -1529,3 +1529,315 @@ def build_best_record(
     # Verify the result is truly JSON-safe (raises if any non-finite leaked)
     json.dumps(sanitized)
     return sanitized
+
+
+@dataclass(frozen=True)
+class FittedEarlyDetector:
+    """Train-only fitted early-detection model bundle.
+
+    Attributes:
+        config: Hyperparameter configuration used for fitting.
+        preprocessor: Preprocessor fitted on the full training window only.
+        estimator: Classifier fitted on the preprocessed full training window.
+        threshold: Frozen operating threshold resolved from training
+            information only.
+        raw_sensor_cols: Ordered list of all raw sensor columns available to
+            the detector.
+        window_cols: Ordered raw sensor columns selected by ``config.access``.
+    """
+
+    config: HyperparamConfig
+    preprocessor: FoldPreprocessor
+    estimator: ClassifierMixin
+    threshold: float
+    raw_sensor_cols: list[str]
+    window_cols: list[str]
+
+
+def hyperparam_config_from_dict(data: Mapping[str, object]) -> HyperparamConfig:
+    """Deserialize a JSON ``config`` object into ``HyperparamConfig``.
+
+    Reconstructs the shape emitted by :func:`hyperparam_config_to_dict`, which
+    is also the ``config`` payload stored in ``models/early_detection_best.json``.
+
+    Args:
+        data: Mapping with the serialized ``HyperparamConfig`` fields.
+
+    Returns:
+        Reconstructed hyperparameter configuration.
+
+    Raises:
+        ValueError: If nested ``access`` or ``model_params`` values are not
+            mappings.
+    """
+    access_raw = data["access"]
+    if not isinstance(access_raw, Mapping):
+        raise ValueError("config['access'] must be a mapping")
+    access_data = cast("Mapping[str, object]", access_raw)
+
+    model_params_raw = data["model_params"]
+    if not isinstance(model_params_raw, Mapping):
+        raise ValueError("config['model_params'] must be a mapping")
+    model_params = dict(cast("Mapping[str, object]", model_params_raw))
+
+    access = SensorAccess(
+        access_type=cast("str", access_data["access_type"]),
+        prefix_end=cast("int | None", access_data["prefix_end"]),
+        window_start=cast("int | None", access_data["window_start"]),
+        window_size=cast("int | None", access_data["window_size"]),
+    )
+
+    return HyperparamConfig(
+        access=access,
+        missing_threshold=cast("float", data["missing_threshold"]),
+        cv_threshold=cast("float", data["cv_threshold"]),
+        correlation_threshold=cast("float", data["correlation_threshold"]),
+        selection_method=cast("str", data["selection_method"]),
+        max_features=cast("int | None", data["max_features"]),
+        model_family=cast("str", data["model_family"]),
+        model_params=model_params,
+        threshold_policy=cast("str", data["threshold_policy"]),
+        threshold=cast("float | None", data["threshold"]),
+        false_alarm_rate=cast("float | None", data["false_alarm_rate"]),
+    )
+
+
+def _model_params_for_training(
+    cfg: HyperparamConfig,
+    y_train: np.ndarray,
+) -> dict[str, object]:
+    """Return estimator params with train-label class weighting applied."""
+    model_params = dict(cfg.model_params)
+    if cfg.model_family in {"xgboost", "lightgbm"} and (
+        "scale_pos_weight" not in model_params
+    ):
+        n_pos = int(np.sum(y_train == 1))
+        n_neg = int(np.sum(y_train == 0))
+        model_params["scale_pos_weight"] = (
+            float(n_neg) / float(n_pos) if n_pos > 0 else 1.0
+        )
+    return model_params
+
+
+def _positive_class_probabilities(
+    estimator: ClassifierMixin,
+    x_arr: np.ndarray,
+) -> np.ndarray:
+    """Return positive-class probabilities with a two-column guard."""
+    predict_proba = getattr(estimator, "predict_proba")
+    proba_out = np.asarray(predict_proba(x_arr), dtype=np.float64)
+    if proba_out.ndim != 2 or proba_out.shape[1] < 2:
+        raise ValueError("Estimator did not produce positive-class probabilities")
+    return proba_out[:, 1]
+
+
+def _resolve_final_threshold_from_training(
+    x_train: pd.DataFrame,
+    y_train: np.ndarray,
+    raw_sensor_cols: list[str],
+    cfg: HyperparamConfig,
+    *,
+    inner_cv_folds: int,
+    random_seed: int,
+) -> float:
+    """Resolve the final operating threshold without test data."""
+    if cfg.threshold_policy == "tune":
+        return float(cast("float", cfg.threshold))
+
+    cv = StratifiedKFold(
+        n_splits=inner_cv_folds, shuffle=True, random_state=random_seed
+    )
+    labels: list[np.ndarray] = []
+    probabilities: list[np.ndarray] = []
+
+    for train_idx, val_idx in cv.split(x_train, y_train):
+        y_fold_train = y_train[train_idx]
+        if len(np.unique(y_fold_train)) < 2:
+            continue
+
+        x_fold_train = x_train.iloc[train_idx]
+        x_fold_val = x_train.iloc[val_idx]
+        x_fold_train_window, _ = select_ordered_sensors(
+            x_fold_train, raw_sensor_cols, cfg.access
+        )
+        x_fold_val_window, _ = select_ordered_sensors(
+            x_fold_val, raw_sensor_cols, cfg.access
+        )
+
+        preprocessor = FoldPreprocessor.fit(
+            x_fold_train_window, y_fold_train, cfg, random_seed
+        )
+        if not preprocessor.retained_cols or len(preprocessor.selected_idx) == 0:
+            continue
+
+        estimator = build_estimator(
+            cfg.model_family,
+            _model_params_for_training(cfg, y_fold_train),
+            random_seed,
+        )
+        estimator.fit(preprocessor.transform(x_fold_train_window), y_fold_train)
+
+        try:
+            y_prob = _positive_class_probabilities(
+                estimator,
+                preprocessor.transform(x_fold_val_window),
+            )
+        except ValueError:
+            continue
+
+        labels.append(y_train[val_idx])
+        probabilities.append(y_prob)
+
+    if not labels:
+        raise ValueError("Cannot resolve final threshold from training data")
+
+    return resolve_threshold(
+        np.concatenate(labels), np.concatenate(probabilities), cfg
+    )
+
+
+def fit_early_detector(
+    x_train: pd.DataFrame,
+    y_train: np.ndarray,
+    raw_sensor_cols: list[str],
+    cfg: HyperparamConfig,
+    *,
+    inner_cv_folds: int,
+    random_seed: int,
+) -> FittedEarlyDetector:
+    """Fit a final early detector and freeze its threshold from train data.
+
+    The helper slices the configured sensor window, resolves the operating
+    threshold without looking at test rows, fits preprocessing on the full
+    training window only, applies the same xgboost/lightgbm
+    ``scale_pos_weight`` default as cross-validation, and fits the final
+    estimator.
+
+    Args:
+        x_train: Training feature frame containing ``raw_sensor_cols``.
+        y_train: Binary labels aligned with ``x_train``.
+        raw_sensor_cols: Ordered list of all raw sensor columns.
+        cfg: Hyperparameter configuration to fit.
+        inner_cv_folds: Number of train-only OOF folds for FAR thresholds.
+        random_seed: Random state for splits, preprocessing, and estimator.
+
+    Returns:
+        Fitted detector bundle ready for holdout evaluation.
+
+    Raises:
+        ValueError: If no raw sensor columns are provided, no train-only OOF
+            predictions exist for FAR threshold resolution, or full-train
+            preprocessing retains zero features.
+    """
+    x_train_window, window_cols = select_ordered_sensors(
+        x_train, raw_sensor_cols, cfg.access
+    )
+    threshold = _resolve_final_threshold_from_training(
+        x_train,
+        y_train,
+        raw_sensor_cols,
+        cfg,
+        inner_cv_folds=inner_cv_folds,
+        random_seed=random_seed,
+    )
+
+    preprocessor = FoldPreprocessor.fit(
+        x_train_window, y_train, cfg, random_seed
+    )
+    if not preprocessor.retained_cols or len(preprocessor.selected_idx) == 0:
+        raise ValueError("Early detector retained zero features")
+
+    estimator = build_estimator(
+        cfg.model_family,
+        _model_params_for_training(cfg, y_train),
+        random_seed,
+    )
+    estimator.fit(preprocessor.transform(x_train_window), y_train)
+
+    return FittedEarlyDetector(
+        config=cfg,
+        preprocessor=preprocessor,
+        estimator=estimator,
+        threshold=threshold,
+        raw_sensor_cols=list(raw_sensor_cols),
+        window_cols=window_cols,
+    )
+
+
+def evaluate_fitted_early_detector(
+    detector: FittedEarlyDetector,
+    x_test: pd.DataFrame,
+    y_test: np.ndarray,
+    *,
+    cost_matrix: CostMatrix | None = None,
+) -> dict[str, object]:
+    """Evaluate a fitted early detector on a test holdout.
+
+    Applies the fitted train-only preprocessor and estimator to the test
+    sensor window, uses the frozen detector threshold, and returns JSON-safe
+    metrics.
+
+    Args:
+        detector: Fitted detector returned by :func:`fit_early_detector`.
+        x_test: Test feature frame containing the detector's raw sensors.
+        y_test: Binary test labels aligned with ``x_test``.
+        cost_matrix: Optional cost matrix for expected-cost calculation.
+
+    Returns:
+        JSON-safe dictionary of holdout metrics and sensor metadata.
+
+    Raises:
+        ValueError: If the estimator does not expose positive-class
+            probabilities, or if the test holdout does not contain both
+            classes.
+    """
+    x_test_window, _ = select_ordered_sensors(
+        x_test, detector.raw_sensor_cols, detector.config.access
+    )
+    x_test_arr = detector.preprocessor.transform(x_test_window)
+    y_prob = _positive_class_probabilities(detector.estimator, x_test_arr)
+
+    y_test_arr = np.asarray(y_test)
+    if len(np.unique(y_test_arr)) < 2:
+        raise ValueError("Test holdout must contain both classes")
+
+    metrics = compute_metrics(y_test_arr, y_prob, threshold=detector.threshold)
+    y_pred = (y_prob >= detector.threshold).astype(int)
+    balanced_accuracy = float(balanced_accuracy_score(y_test_arr, y_pred))
+
+    tn = int(metrics.confusion_matrix[0][0])
+    fp = int(metrics.confusion_matrix[0][1])
+    false_alarm_rate = float(fp / (fp + tn))
+
+    expected_cost: float | None
+    if cost_matrix is None:
+        expected_cost = None
+    else:
+        expected_cost = expected_cost_at_threshold(
+            y_test_arr, y_prob, detector.threshold, cost_matrix
+        )
+
+    result: dict[str, object] = {
+        "test_pr_auc": metrics.pr_auc,
+        "test_roc_auc": metrics.roc_auc,
+        "test_precision": metrics.precision,
+        "test_recall": metrics.recall,
+        "test_f1": metrics.f1,
+        "test_balanced_accuracy": balanced_accuracy,
+        "test_false_alarm_rate": false_alarm_rate,
+        "expected_cost": expected_cost,
+        "threshold": detector.threshold,
+        "confusion_matrix": metrics.confusion_matrix,
+        "n_sensors_used": len(detector.window_cols),
+        "sensor_fraction": observation_fraction(
+            detector.config.access, len(detector.raw_sensor_cols)
+        ),
+        "latest_index": latest_index(
+            detector.config.access, len(detector.raw_sensor_cols)
+        ),
+        "n_features_selected": len(detector.preprocessor.selected_idx),
+    }
+
+    sanitized = cast("dict[str, object]", _sanitize(result))
+    json.dumps(sanitized, allow_nan=False)
+    return sanitized
