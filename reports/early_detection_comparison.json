@@ -16,7 +16,7 @@
       "test_f1": 0.24242424242424243,
       "test_balanced_accuracy": 0.7136363636363636,
       "test_false_alarm_rate": 0.32272727272727275,
-      "expected_cost": null,
+      "expected_cost": 111.0,
       "threshold": 0.2171299206877838,
       "confusion_matrix": [
         [
@@ -44,7 +44,7 @@
       "test_f1": 0.22727272727272727,
       "test_balanced_accuracy": 0.6715909090909091,
       "test_false_alarm_rate": 0.2818181818181818,
-      "expected_cost": null,
+      "expected_cost": 122.0,
       "threshold": 0.2171299206877838,
       "confusion_matrix": [
         [
@@ -92,7 +92,7 @@
       "test_f1": 0.0958904109589041,
       "test_balanced_accuracy": 0.43920454545454546,
       "test_false_alarm_rate": 0.5590909090909091,
-      "expected_cost": null,
+      "expected_cost": 213.0,
       "threshold": 0.2171299206877838,
       "confusion_matrix": [
         [
@@ -120,7 +120,7 @@
       "test_f1": 0.13432835820895522,
       "test_balanced_accuracy": 0.5335227272727272,
       "test_false_alarm_rate": 0.4954545454545455,
-      "expected_cost": null,
+      "expected_cost": 179.0,
       "threshold": 0.2171299206877838,
       "confusion_matrix": [
         [
@@ -148,7 +148,7 @@
       "test_f1": 0.21052631578947367,
       "test_balanced_accuracy": 0.6795454545454546,
       "test_false_alarm_rate": 0.39090909090909093,
-      "expected_cost": null,
+      "expected_cost": 126.0,
       "threshold": 0.2171299206877838,
       "confusion_matrix": [
         [
@@ -176,7 +176,7 @@
       "test_f1": 0.22916666666666666,
       "test_balanced_accuracy": 0.6869318181818183,
       "test_false_alarm_rate": 0.31363636363636366,
-      "expected_cost": null,
+      "expected_cost": 119.0,
       "threshold": 0.2171299206877838,
       "confusion_matrix": [
         [
@@ -204,7 +204,7 @@
       "test_f1": 0.24242424242424243,
       "test_balanced_accuracy": 0.7136363636363636,
       "test_false_alarm_rate": 0.32272727272727275,
-      "expected_cost": null,
+      "expected_cost": 111.0,
       "threshold": 0.2171299206877838,
       "confusion_matrix": [
         [
@@ -232,7 +232,7 @@
       "test_f1": 0.2857142857142857,
       "test_balanced_accuracy": 0.7477272727272728,
       "test_false_alarm_rate": 0.2545454545454545,
-      "expected_cost": null,
+      "expected_cost": 96.0,
       "threshold": 0.2171299206877838,
       "confusion_matrix": [
         [
@@ -260,7 +260,7 @@
       "test_f1": 0.25287356321839083,
       "test_balanced_accuracy": 0.7073863636363636,
       "test_false_alarm_rate": 0.2727272727272727,
-      "expected_cost": null,
+      "expected_cost": 110.0,
       "threshold": 0.2171299206877838,
       "confusion_matrix": [
         [
@@ -288,7 +288,7 @@
       "test_f1": 0.22727272727272727,
       "test_balanced_accuracy": 0.6715909090909091,
       "test_false_alarm_rate": 0.2818181818181818,
-      "expected_cost": null,
+      "expected_cost": 122.0,
       "threshold": 0.2171299206877838,
       "confusion_matrix": [
         [

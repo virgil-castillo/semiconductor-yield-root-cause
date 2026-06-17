@@ -111,15 +111,17 @@ They are not held-out metrics.
 
 Verdict: `baseline_preferred`.
 
-| Role | Model | Sensors | PR-AUC | ROC-AUC | Precision | Recall | F1 | False alarm rate | Threshold |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `early_optuna_best` | random_forest | 155 / 590 | 0.194720 | 0.759091 | 0.144578 | 0.750000 | 0.242424 | 0.322727 | 0.217130 |
-| `full_prefix_same_config` | random_forest | 590 / 590 | 0.221676 | 0.758807 | 0.138889 | 0.625000 | 0.227273 | 0.281818 | 0.217130 |
-| `tabular_selected_model` | random_forest | 590 / 590 | 0.221624 | 0.792614 | 0.196970 | 0.812500 | n/a | n/a | 0.140000 |
+| Role | Model | Sensors | PR-AUC | ROC-AUC | Precision | Recall | F1 | False alarm rate | Expected cost | Threshold |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `early_optuna_best` | random_forest | 155 / 590 | 0.194720 | 0.759091 | 0.144578 | 0.750000 | 0.242424 | 0.322727 | 111.0 | 0.217130 |
+| `full_prefix_same_config` | random_forest | 590 / 590 | 0.221676 | 0.758807 | 0.138889 | 0.625000 | 0.227273 | 0.281818 | 122.0 | 0.217130 |
+| `tabular_selected_model` | random_forest | 590 / 590 | 0.221624 | 0.792614 | 0.196970 | 0.812500 | n/a | n/a | 83.0 | 0.140000 |
 
 The selected early model uses 26.3% of the sensor sequence. Its held-out PR-AUC
 is below the best full-sensor comparison by more than the configured 5%
-tolerance, so the current held-out result favors the full-sensor baseline.
+tolerance, so the current held-out result favors the full-sensor baseline. At
+the recorded thresholds, expected costs are 111.0 for the early model, 122.0 for
+the full-prefix variant, and 83.0 for the selected tabular baseline.
 
 Confusion matrices at the recorded thresholds:
 
@@ -204,7 +206,9 @@ On the held-out split, the selected early model reaches PR-AUC 0.194720. The
 same non-access configuration with all sensors reaches PR-AUC 0.221676, and the
 existing selected tabular baseline reaches PR-AUC 0.221624. Under the configured
 5% tolerance rule, the early model is not competitive with the full-sensor
-comparisons in this completed study.
+comparisons in this completed study. The expected-cost comparison at the
+recorded thresholds is 111.0 for the early model, 122.0 for the full-prefix
+variant, and 83.0 for the selected tabular baseline.
 
 The result should be interpreted as useful evidence about where early signal may
 exist in the ordered sensor sequence, not as a production early-exit model.

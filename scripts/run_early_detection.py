@@ -333,9 +333,11 @@ def main(argv: list[str] | None = None) -> None:
         print("No raw sensor_ columns found", file=sys.stderr)
         sys.exit(1)
 
-    cost_matrix = None
+    cost_cfg = load_cost_config()
+    study_cost_matrix = None
     if ed_cfg.detection_metric == "neg_expected_cost":
-        cost_matrix = load_cost_config().cost_matrix
+        study_cost_matrix = cost_cfg.cost_matrix
+    holdout_cost_matrix = cost_cfg.cost_matrix
 
     cfg.paths.reports_dir.mkdir(parents=True, exist_ok=True)
     cfg.paths.figures_dir.mkdir(parents=True, exist_ok=True)
@@ -356,7 +358,7 @@ def main(argv: list[str] | None = None) -> None:
             raw_sensor_cols,
             ed_cfg,
             random_seed=cfg.run.random_seed,
-            cost_matrix=cost_matrix,
+            cost_matrix=study_cost_matrix,
         )
         joblib.dump(study, study_path)
 
@@ -391,7 +393,7 @@ def main(argv: list[str] | None = None) -> None:
         df,
         best_record,
         ed_cfg,
-        cost_matrix,
+        holdout_cost_matrix,
         model_comparison_path=cfg.paths.reports_dir / "model_comparison.json",
     )
     _write_spec_c_artifacts(

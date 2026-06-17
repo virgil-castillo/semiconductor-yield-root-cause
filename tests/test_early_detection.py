@@ -4128,16 +4128,29 @@ def test_evaluate_existing_skips_optuna_and_writes_spec_c_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """--evaluate-existing loads best.json, skips study artifacts, and writes Spec C."""
+    from yield_risk.config import CostMatrix
+
     mod = _load_cli()
     df = _tiny_secom()
     fake_cfg = _fake_config(tmp_path)
     yaml_path = _write_minimal_ed_yaml(tmp_path)
+    expected_cost_matrix = CostMatrix(
+        true_pass=0.0,
+        true_fail=0.0,
+        false_fail=1.0,
+        false_pass=10.0,
+    )
     fake_cfg.paths.models_dir.mkdir(parents=True)
     best_path = fake_cfg.paths.models_dir / "early_detection_best.json"
     best_payload = _fake_best_record_for_cli()
     best_path.write_text(json.dumps(best_payload), encoding="utf-8")
 
     monkeypatch.setattr(mod, "load_config", lambda: fake_cfg)
+    monkeypatch.setattr(
+        mod,
+        "load_cost_config",
+        lambda: types.SimpleNamespace(cost_matrix=expected_cost_matrix),
+    )
     monkeypatch.setattr(mod, "load_secom", lambda raw_dir: df)
     monkeypatch.setattr(mod, "validate_secom", lambda df_: None)
     monkeypatch.setattr(
@@ -4170,7 +4183,7 @@ def test_evaluate_existing_skips_optuna_and_writes_spec_c_artifacts(
         assert df_ is df
         assert best_record == best_payload
         assert ed_cfg.n_trials == 2
-        assert cost_matrix is None
+        assert cost_matrix is expected_cost_matrix
         calls.append(model_comparison_path)
         return _fake_holdout_result()
 
@@ -4223,13 +4236,26 @@ def test_default_path_runs_study_and_writes_spec_c_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Default CLI path writes Spec B artifacts, then evaluates and writes Spec C."""
+    from yield_risk.config import CostMatrix
+
     mod = _load_cli()
     df = _tiny_secom()
     fake_cfg = _fake_config(tmp_path)
     yaml_path = _write_minimal_ed_yaml(tmp_path)
     best_payload = _fake_best_record_for_cli()
+    expected_cost_matrix = CostMatrix(
+        true_pass=0.0,
+        true_fail=0.0,
+        false_fail=1.0,
+        false_pass=10.0,
+    )
 
     monkeypatch.setattr(mod, "load_config", lambda: fake_cfg)
+    monkeypatch.setattr(
+        mod,
+        "load_cost_config",
+        lambda: types.SimpleNamespace(cost_matrix=expected_cost_matrix),
+    )
     monkeypatch.setattr(mod, "load_secom", lambda raw_dir: df)
     monkeypatch.setattr(mod, "validate_secom", lambda df_: None)
 
@@ -4239,6 +4265,7 @@ def test_default_path_runs_study_and_writes_spec_c_artifacts(
         """Return a fake study and record that the study path executed."""
         nonlocal study_calls
         study_calls += 1
+        assert kwargs["cost_matrix"] is None
         return _FakeStudy()
 
     dump_calls: list[Path] = []
@@ -4262,7 +4289,7 @@ def test_default_path_runs_study_and_writes_spec_c_artifacts(
         assert df_ is df
         assert best_record == best_payload
         assert ed_cfg.n_trials == 2
-        assert cost_matrix is None
+        assert cost_matrix is expected_cost_matrix
         eval_calls.append(model_comparison_path)
         return _fake_holdout_result()
 
