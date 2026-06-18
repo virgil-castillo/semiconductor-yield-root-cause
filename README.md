@@ -3,7 +3,8 @@
 Yield-risk scoring and root-cause candidate ranking on
 the UCI SECOM semiconductor manufacturing benchmark. The system builds a
 training-safe pipeline for wafer pass/fail prediction, cost-sensitive threshold
-selection, sensor ranking, batch scoring, and monitoring/reporting checks.
+selection, early-detection tradeoff analysis, sensor ranking, batch scoring, and
+monitoring/reporting checks.
 
 ---
 
@@ -16,13 +17,14 @@ selection, sensor ranking, batch scoring, and monitoring/reporting checks.
 5. [Methodology](#methodology)
 6. [Modeling approach](#modeling-approach)
 7. [Root-cause sensor ranking](#root-cause-sensor-ranking)
-8. [Cost-sensitive decision policy](#cost-sensitive-decision-policy)
-9. [Dashboard](#dashboard)
-10. [API](#api)
-11. [Reproducing the project](#reproducing-the-project)
-12. [Repository structure](#repository-structure)
-13. [Limitations](#limitations)
-14. [Future work](#future-work)
+8. [Early-detection study](#early-detection-study)
+9. [Cost-sensitive decision policy](#cost-sensitive-decision-policy)
+10. [Dashboard](#dashboard)
+11. [API](#api)
+12. [Reproducing the project](#reproducing-the-project)
+13. [Repository structure](#repository-structure)
+14. [Limitations](#limitations)
+15. [Future work](#future-work)
 
 ---
 
@@ -68,8 +70,10 @@ material.
 
 ## Key results
 
-Model selection is based on training-only 5-fold CV PR-AUC. The held-out test
-set is used once for final comparison and cost-threshold evaluation.
+Main model selection is based on training-only 5-fold CV PR-AUC. The held-out
+test set is reserved for final model comparison and cost-threshold evaluation.
+The early-detection branch also reports a documented diagnostic prefix sweep on
+that same split.
 
 | Model | CV PR-AUC | Test PR-AUC | Test ROC-AUC | Recall (fail) | Precision | Opt. threshold | Cost |
 |-------|-----------|-------------|--------------|---------------|-----------|----------------|------|
@@ -96,6 +100,16 @@ on three sensors (`sensor_059`, `sensor_033`, `sensor_103`), with
 a top-ten overlap of 7/10. The reporting pipeline does not persist a
 cross-model sensitivity artifact; the comparison is computed for display in
 `notebooks/04_2_xgboost_root_cause_sensitivity.ipynb`.
+
+**Early-detection closeout:** the Optuna study found useful early signal, but
+not enough held-out evidence to replace the full-sensor model. The selected
+early configuration uses the first 155 of 590 sensors and reaches held-out
+PR-AUC 0.195, below the full-sensor comparisons at roughly 0.222. A diagnostic
+prefix sweep shows where the signal becomes useful: 64 sensors reach PR-AUC
+0.216, and 256 sensors reach PR-AUC 0.223 with lower expected cost than the
+same configuration using all sensors. The selected early prefix also contains
+8 of the top 10 SHAP root-cause sensors, including `sensor_059`,
+`sensor_033`, and `sensor_103`.
 
 ---
 
@@ -178,7 +192,9 @@ Steps include:
 
 A single stratified 85/15 train/test split is performed before any model fitting.
 Class weights and SMOTE are evaluated during cross-validation on the training fold
-only. The held-out test set is touched exactly once for final evaluation.
+only. Main model selection is fixed before held-out evaluation; the
+early-detection study additionally uses the held-out split for a diagnostic
+prefix curve that does not feed back into model choice.
 
 ### 5. Modeling
 
@@ -191,6 +207,10 @@ See [Cost-sensitive decision policy](#cost-sensitive-decision-policy) below.
 ### 7. Root-cause sensor ranking
 
 See [Root-cause sensor ranking](#root-cause-sensor-ranking) below.
+
+### 8. Early-detection optimization
+
+See [Early-detection study](#early-detection-study) below.
 
 ---
 
@@ -252,6 +272,53 @@ modes or process steps. The public benchmark is a historical snapshot, not a
 complete fab execution trace. In a fab follow-up, the next engineering action is
 to map top IDs such as `sensor_059` to process step, tool, chamber, recipe, lot
 history, and maintenance records before changing process settings.
+
+---
+
+## Early-detection study
+
+The early-detection branch asks whether a yield-risk decision can be made before
+all 590 anonymous sensor measurements are available. The experiment treats raw
+SECOM column order as a fabrication-progress proxy, then uses an Optuna
+`TPESampler` study to optimize model family, preprocessing thresholds, feature
+selection, sensor access pattern, and threshold settings. The objective is:
+
+```text
+penalized_score = mean_inner_cv_pr_auc - 0.10 * observation_fraction
+```
+
+The completed study ran all 100 configured trials; 99 were feasible. The best
+Optuna objective came from trial 85, a random forest using prefix access through
+155 sensors, or 26.3% of the sequence. Its inner-CV PR-AUC was 0.224 and its
+penalized objective was 0.198.
+
+Held-out evaluation changes the interpretation. The trial-85 early model reaches
+test PR-AUC 0.195, while the same non-access configuration with all sensors
+reaches 0.222 and the selected full tabular model reaches 0.222. Under the
+configured 5% tolerance rule, the branch verdict is `baseline_preferred`: the
+early model is evidence of useful early signal, not a production early-exit
+replacement.
+
+The diagnostic prefix curve is the strongest engineering result from the branch:
+
+| Sensor prefix | Sensor fraction | Held-out PR-AUC | Expected cost |
+|---------------|-----------------|-----------------|---------------|
+| 64 sensors | 10.8% | 0.216 | 126 |
+| 155 sensors | 26.3% | 0.195 | 111 |
+| 256 sensors | 43.4% | 0.223 | 96 |
+| 590 sensors | 100.0% | 0.222 | 122 |
+
+The prefix analysis suggests that failure signal appears early and saturates
+well before the full 590-sensor sequence, but the exact early operating point
+should be confirmed with paired statistical tests before deployment. The
+root-cause overlap supports that interpretation: 8 of the top 10 SHAP
+root-cause sensors fall inside the first 155 sensors, versus about 2.6 expected
+by chance under a random prefix. A hypergeometric enrichment test gives
+`p ~= 5.36e-4` for that overlap.
+
+Use [notebooks/05_early_detection.ipynb](notebooks/05_early_detection.ipynb)
+and [docs/early_detection.md](docs/early_detection.md) for the full study
+report, held-out comparison, prefix curve, and statistical evidence checklist.
 
 ---
 
@@ -439,6 +506,7 @@ python scripts/train_models.py           # Train/tune model families, select win
 python scripts/evaluate_model.py         # Evaluate on the held-out test set
 python scripts/feature_importance.py     # Selected-model feature importance
 python scripts/generate_explanations.py  # SHAP values + root-cause tables
+python scripts/run_early_detection.py --evaluate-existing  # Early-detection report
 python scripts/generate_reports.py       # Markdown reports
 ```
 
@@ -469,9 +537,11 @@ semiconductor-yield-root-cause/
 │                     #   models, evaluation, importance, explainability,
 │                     #   thresholding, root cause, monitoring, reporting
 ├── scripts/          # CLI entry points; sole writers of artifacts
-│                     #   (download → split → train → evaluate → explain → report)
+│                     #   (download → split → train → evaluate → explain →
+│                     #   early-detect → report)
 ├── notebooks/        # Read-only analyses (EDA → sensor shortlist →
-│                     #   modeling → root cause → XGBoost sensitivity)
+│                     #   modeling → root cause → XGBoost sensitivity →
+│                     #   early detection)
 ├── api/              # FastAPI scoring service (endpoints + Pydantic schemas)
 ├── configs/          # YAML run, model, and cost configuration
 ├── reports/          # Generated metrics, markdown reports, figures
@@ -509,6 +579,11 @@ Planned work — the Streamlit dashboard, Docker packaging, and CI — is tracke
   reported metrics account for this, but deployment decisions should be made
   with awareness of the operating cost structure.
 
+- **Early-detection sensor order.** The public SECOM release does not include
+  true process-stage metadata. The early-detection study uses raw sensor column
+  order as a progress proxy, so its prefix conclusions should be validated
+  against real step, tool, and timestamp metadata before process use.
+
 ---
 
 ## Future work
@@ -525,3 +600,7 @@ Planned work — the Streamlit dashboard, Docker packaging, and CI — is tracke
   tools and chambers to produce actionable engineering recommendations.
 - **Real-time SPC integration** — feed model risk scores into existing SPC
   dashboards so operators see early-warning flags alongside traditional control charts.
+- **Early-detection confirmation** — persist per-wafer early/full predictions,
+  then run paired bootstrap, DeLong, McNemar, and non-inferiority tests to
+  confirm whether a shorter sensor prefix can meet the full-sensor operating
+  point under production cost constraints.

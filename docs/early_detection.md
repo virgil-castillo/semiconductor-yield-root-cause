@@ -1,6 +1,7 @@
 # Early Detection Study
 
 Generated: 2026-06-17
+Updated: 2026-06-18
 
 ## Status
 
@@ -25,7 +26,8 @@ python scripts\run_early_detection.py --evaluate-existing
 This document is the human-facing usage and interpretation report described by
 the early-detection design docs. The current artifact set includes the Optuna
 study handoff artifacts plus the held-out comparison, comparison CSV, diagnostic
-prefix curve CSV, and curve figure.
+prefix curve CSV, curve figure, and root-cause overlap checks against the
+selected-model explanation artifacts.
 
 ## Method
 
@@ -82,7 +84,7 @@ Best trial: `85`
 | Penalized score | 0.197619 |
 | Mean inner-CV PR-AUC | 0.223890 |
 | Observation fraction | 0.262712 |
-| Latest sensor index | 155 |
+| Prefix end / sensors used | 155 |
 | Sensors used | 155 / 590 |
 | Mean selected features | 72.6 |
 | Feasible | true |
@@ -91,7 +93,7 @@ Best configuration:
 
 | Field | Value |
 | --- | --- |
-| Sensor access | Prefix through sensor index 155 |
+| Sensor access | Prefix length 155 (`prefix_end=155`, exclusive boundary) |
 | Missing threshold | 0.434558 |
 | CV threshold | 0.071714 |
 | Correlation threshold | 0.929347 |
@@ -136,27 +138,52 @@ that existing artifact records expected cost `83.0` at threshold `0.14`.
 ## Diagnostic Prefix Curve
 
 The diagnostic curve reuses the winning non-access settings and refits prefix
-models at configured prefix lengths, the selected early index, and the full
-sensor count. It is diagnostic only and does not feed back into model choice.
+models at configured prefix lengths, the selected early prefix length, and the
+full sensor count. It is diagnostic only and does not feed back into model
+choice.
 
-| Latest sensor index | Sensor fraction | Held-out PR-AUC |
-| ---: | ---: | ---: |
-| 16 | 0.027119 | 0.074693 |
-| 32 | 0.054237 | 0.090292 |
-| 64 | 0.108475 | 0.215714 |
-| 128 | 0.216949 | 0.205706 |
-| 155 | 0.262712 | 0.194720 |
-| 256 | 0.433898 | 0.223055 |
-| 512 | 0.867797 | 0.216824 |
-| 590 | 1.000000 | 0.221676 |
+| Prefix length | Sensor fraction | Held-out PR-AUC | Expected cost |
+| ---: | ---: | ---: | ---: |
+| 16 | 0.027119 | 0.074693 | 213.0 |
+| 32 | 0.054237 | 0.090292 | 179.0 |
+| 64 | 0.108475 | 0.215714 | 126.0 |
+| 128 | 0.216949 | 0.205706 | 119.0 |
+| 155 | 0.262712 | 0.194720 | 111.0 |
+| 256 | 0.433898 | 0.223055 | 96.0 |
+| 512 | 0.867797 | 0.216824 | 110.0 |
+| 590 | 1.000000 | 0.221676 | 122.0 |
 
 The best point on this descriptive curve is index 256 with held-out PR-AUC
 0.223055, but this was not selected by the Optuna study and is not a replacement
-model decision.
+model decision. The curve is still the branch's strongest engineering signal:
+64 sensors already reach PR-AUC 0.215714, within the configured 5% tolerance of
+the full-prefix comparison, and 256 sensors produce the best diagnostic
+combination of PR-AUC and expected cost in this artifact set.
+
+## Root-Cause Overlap
+
+The selected early prefix contains most of the sensors already highlighted by
+the selected full model's SHAP root-cause ranking. This supports the
+interpretation that early detection is finding signal in the same region of the
+sensor order that later drives the full-model explanation.
+
+| Ranking source | Top N | Inside first 155 sensors | Expected by chance | Hypergeometric p-value |
+| --- | ---: | ---: | ---: | ---: |
+| SHAP root-cause candidates | 5 | 5 / 5 | 1.31 | 0.001193 |
+| SHAP root-cause candidates | 10 | 8 / 10 | 2.63 | 0.000536 |
+| SHAP root-cause candidates | 20 | 12 / 20 | 5.25 | 0.001241 |
+| Selected-model impurity importance | 10 | 8 / 10 | 2.63 | 0.000536 |
+| Selected-model impurity importance | 20 | 14 / 20 | 5.25 | 0.000039 |
+
+The top SHAP candidates inside the selected early prefix include `sensor_059`,
+`sensor_033`, `sensor_103`, `sensor_031`, `sensor_129`, `sensor_130`,
+`sensor_021`, and `sensor_064`. The same caveat still applies: SECOM sensor IDs
+are anonymized, so this is an enrichment result over anonymous column order, not
+a causal process-stage claim.
 
 ## Top Trials
 
-| Trial | Score | PR-AUC | Observation fraction | Latest sensor | Features | Model | Access | Selection |
+| Trial | Score | PR-AUC | Observation fraction | Prefix end / latest index | Features | Model | Access | Selection |
 | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |
 | 85 | 0.197619 | 0.223890 | 0.262712 | 155 | 72.6 | random_forest | prefix | none |
 | 25 | 0.196408 | 0.223188 | 0.267797 | 158 | 74.4 | random_forest | prefix | univariate |
@@ -179,8 +206,8 @@ model decision.
 | Mean observation fraction | 0.326831 |
 | Minimum observation fraction | 0.003390 |
 | Maximum observation fraction | 1.000000 |
-| Minimum latest sensor index | 2 |
-| Maximum latest sensor index | 590 |
+| Minimum prefix end / latest-index field | 2 |
+| Maximum prefix end / latest-index field | 590 |
 
 Trial distribution:
 
@@ -194,6 +221,11 @@ Among the top ten trials by penalized score, all used prefix access and nine
 used random forests. Their mean observation fraction was 0.226441, so the best
 region of the completed search favors earlier prefixes rather than full-sensor
 access.
+
+These category summaries are search diagnostics. Because Optuna samples
+adaptively, they are directional evidence rather than balanced experimental
+effects. A confirmatory comparison of model families or access patterns would
+need repeated seeded studies or a balanced follow-up experiment.
 
 ## Interpretation
 
@@ -211,7 +243,27 @@ recorded thresholds is 111.0 for the early model, 122.0 for the full-prefix
 variant, and 83.0 for the selected tabular baseline.
 
 The result should be interpreted as useful evidence about where early signal may
-exist in the ordered sensor sequence, not as a production early-exit model.
+exist in the ordered sensor sequence, not as a production early-exit model. The
+diagnostic curve and root-cause enrichment point to the same practical
+conclusion: the failure signal appears early and may saturate before the full
+590-sensor sequence, but the exact early operating point needs paired
+confirmation before deployment.
+
+## Statistical Evidence And Confirmation Plan
+
+| Question | Current evidence | Method needed |
+| --- | --- | --- |
+| Are top root-cause sensors enriched in the selected early prefix? | Supported by current artifacts; 8 of the top 10 SHAP candidates are inside the first 155 sensors. | Hypergeometric enrichment test. |
+| Is the selected early model non-inferior to the full-sensor model? | Not supported by the current held-out metrics; PR-AUC is 0.194720 vs 0.221676. | Paired bootstrap PR-AUC difference with the configured 5% non-inferiority margin. |
+| Are 64- or 256-sensor prefixes viable operating points? | Promising diagnostic curve points: PR-AUC 0.215714 at 64 sensors and 0.223055 at 256 sensors. | Paired bootstrap over saved per-wafer prefix predictions. |
+| Are prefix access and random forest truly better than alternatives? | Directional only; top trials mostly use prefix access and random forest. | Repeated seeded Optuna studies or a balanced confirmatory experiment. |
+| Do thresholded decisions differ materially between early and full models? | Aggregate confusion matrices are available, but paired wafer-level disagreements are not persisted. | McNemar test plus paired bootstrap for recall, false-alarm rate, and expected cost. |
+| Are ROC-AUC differences meaningful? | Aggregate ROC-AUC values are available. | DeLong test on paired prediction scores. |
+
+The current artifact set is enough to support the root-cause enrichment claim
+and the descriptive prefix-curve interpretation. It is not enough to prove
+non-inferiority or thresholded decision equivalence because the early/full
+per-wafer score vectors are not persisted for every comparison.
 
 ## Reproducing The Study
 
