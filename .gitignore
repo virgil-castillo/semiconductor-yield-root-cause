@@ -47,4 +47,5 @@ mlruns/
 .vscode/
 
 # Local scratch files
+.pytest-run-temp/
 tmp/
