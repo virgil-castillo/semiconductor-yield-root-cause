@@ -5,8 +5,8 @@
 Finish the current early-detection branch by turning the completed Optuna study
 artifact into held-out evidence. Refit the selected early configuration on the
 full train split, evaluate it once on the reproduced test split, compare it to
-full-sensor references, write the deferred reports/figure, and update the human
-interpretation doc.
+full-sensor references, write the deferred reports/figure, and update the
+early-detection report.
 
 This spec does not add multi-objective Optuna and does not run a second
 full-feature Optuna search. Those are follow-on experiments. This slice answers:

@@ -23,11 +23,10 @@ python scripts\run_early_detection.py --evaluate-existing
 
 ## Scope
 
-This document is the human-facing usage and interpretation report described by
-the early-detection design docs. The current artifact set includes the Optuna
-study handoff artifacts plus the held-out comparison, comparison CSV, diagnostic
-prefix curve CSV, curve figure, and root-cause overlap checks against the
-selected-model explanation artifacts.
+The completed early-detection work includes the Optuna study handoff artifacts
+plus the held-out comparison, comparison CSV, diagnostic prefix curve CSV, curve
+figure, and root-cause overlap checks against the selected-model explanation
+artifacts.
 
 ## Method
 

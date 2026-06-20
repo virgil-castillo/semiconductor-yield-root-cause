@@ -597,7 +597,7 @@ Planned work — the Streamlit dashboard, Docker packaging, and CI — is tracke
 - **Causal inference** — apply causal discovery methods (PC algorithm, DoWhy) to
   generate stronger hypotheses about process-to-yield relationships.
 - **Tool-level integration** — link anonymous sensor features to specific process
-  tools and chambers to produce actionable engineering recommendations.
+  tools and chambers to produce engineering recommendations.
 - **Real-time SPC integration** — feed model risk scores into existing SPC
   dashboards so operators see early-warning flags alongside traditional control charts.
 - **Early-detection confirmation** — persist per-wafer early/full predictions,
