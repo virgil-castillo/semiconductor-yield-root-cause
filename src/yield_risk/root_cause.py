@@ -26,7 +26,7 @@ def spc_flag_rate(
     avoids self-normalisation: a broad excursion in *df* would otherwise inflate
     its own mean and std and mute the very shift being looked for.  When
     *reference* is ``None`` the limits fall back to *df* itself (in-sample,
-    less robust).
+    less stable).
 
     Args:
         df: DataFrame containing *sensor_cols* whose rows are evaluated.

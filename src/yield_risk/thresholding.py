@@ -99,7 +99,7 @@ def find_optimal_threshold(
     configured ``[low, high]`` operating band. This finds the exact minimum
     without depending on a fixed grid's resolution, and places the chosen
     threshold *between* observed scores rather than exactly on one, which is more
-    robust to small score shifts on future data. The boundary midpoints also
+    stable under small score shifts on future data. The boundary midpoints also
     cover the all-flag and all-release regimes within the band.
 
     Ties are broken by choosing the lowest qualifying threshold (safety-leaning:

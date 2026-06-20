@@ -102,7 +102,7 @@ def evaluate_at_threshold(
 
 
 def format_report(metrics: ClassificationMetrics, model_name: str = "Model") -> str:
-    """Format metrics as a human-readable multi-line text report.
+    """Format metrics as a plain-text multi-line report.
 
     Args:
         metrics: Computed classification metrics.
