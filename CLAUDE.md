@@ -2,9 +2,13 @@
 
 Dev contract for Claude Code when working in this repository.
 
+## Environment
+
+Use the `mlops` Conda environment from `environment.yml` for development and verification.
+
 ## Commands
 
-```bash
+```text
 ruff check src/ tests/                 # lint
 mypy src/yield_risk                    # type-check
 

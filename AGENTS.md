@@ -4,23 +4,11 @@ Dev contract for coding agents when working in this repository.
 
 ## Environment
 
-Conda lives at `$env:USERPROFILE\miniconda3`. Agents may not inherit a login shell, so the `mlops` env must be activated explicitly before running Python commands.
-
-**PowerShell tool:**
-```powershell
-. "$env:USERPROFILE\miniconda3\shell\condabin\conda-hook.ps1"
-conda activate mlops
-```
-
-**Bash tool:**
-```bash
-source ~/miniconda3/Scripts/activate
-conda activate mlops
-```
+Use the `mlops` Conda environment from `environment.yml` for development and verification.
 
 ## Commands
 
-```bash
+```text
 ruff check src/ tests/                 # lint
 mypy src/yield_risk                    # type-check
 
